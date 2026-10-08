@@ -1,0 +1,78 @@
+version: 1
+name: billing-hardened
+
+# The "after" picture: the same spec, configured so the self-scan passes.
+
+defaults:
+  mode: read-only
+  on_unclassified: deny
+
+rules:
+  # Reads of ordinary business objects.
+  - id: allow-reads
+    match: "{get,list}_*"
+    effect: read
+    decision: allow
+
+  # Creating an invoice is permitted, but only under a human's eye and only
+  # within bounds the model cannot talk its way past.
+  - id: create-invoice
+    match: create_invoice
+    effect: write
+    decision: approve
+    args:
+      amount: { min: 1, max: 50000 }
+      currency: { enum: [usd] }
+    reason: invoices change the customer's bill
+
+  # Moving money is not something an agent does here, at any amount.
+  - id: no-transfers
+    match: create_transfer
+    decision: deny
+    reason: agents do not move money in this deployment
+
+  # A webhook URL is an egress channel chosen by the model, so it stays closed.
+  - id: no-webhooks
+    match: create_webhook
+    decision: deny
+    reason: an agent-chosen webhook URL is an exfiltration channel
+
+  - id: no-deletes
+    match: "{delete,purge}_*"
+    decision: deny
+    reason: this deployment never deletes billing records
+
+tenant:
+  field: org_id
+  aliases: [organization_id]
+  source:
+    kind: env
+    name: BILLING_ORG_ID
+  inject: [path, query, body]
+  on_mismatch: deny
+  required: true
+
+egress:
+  allow: ["billing.internal.example.com"]
+  methods: [GET, POST]
+  max_body_bytes: 1048576
+  max_request_body_bytes: 65536
+  timeout_ms: 8000
+  max_redirects: 0
+  block_private_ips: true
+  # The example host is internal and plaintext, which a real deployment should
+  # not be. It is permitted here only so the example is runnable.
+  allow_http: true
+
+approvals:
+  mode: both
+  ttl_seconds: 180
+  single_use: true
+
+audit:
+  enabled: true
+  path: ~/.hmcp/audit.jsonl
+  hash_chain: true
+  redact: [memo]
+
+tool_budget: 12

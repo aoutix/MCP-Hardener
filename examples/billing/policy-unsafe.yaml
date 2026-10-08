@@ -1,0 +1,36 @@
+version: 1
+name: billing-UNSAFE-do-not-use
+
+# This policy is the "before" picture: it is what someone writes when they wrap
+# an API quickly and assume the defaults will protect them. Building against it
+# fails the self-scan. Compare it with policy.yaml.
+
+defaults:
+  mode: approve-writes
+  on_unclassified: approve
+
+rules:
+  # A catch-all allow. This is the single most common mistake: it silently
+  # covers the destructive tools too.
+  - id: allow-everything
+    match: "*"
+    decision: allow
+    reason: "convenient during development"
+
+# No tenant block at all, so every org_id stays an agent-supplied argument.
+
+egress:
+  # Points at the wrong host, so every call would be refused at runtime - and
+  # the base URL is plaintext HTTP.
+  allow: ["api.stripe.com"]
+  methods: [GET, POST, DELETE]
+  max_body_bytes: 104857600
+
+approvals:
+  mode: deny
+
+audit:
+  enabled: false
+
+# tool_budget is left at its default of 40, which is how it usually goes: nobody
+# chose a number, so the agent gets whatever the spec happened to contain.
