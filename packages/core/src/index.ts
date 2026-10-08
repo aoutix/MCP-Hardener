@@ -11,3 +11,4 @@ export * from "./audit.js";
 export * from "./approvals.js";
 export * from "./egress.js";
 export * from "./ip.js";
+export * from "./tenant.js";
