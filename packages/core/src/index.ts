@@ -6,4 +6,5 @@ export * from "./decide.js";
 export * from "./grants.js";
 export * from "./exposure.js";
 export * from "./resolve.js";
+export * from "./registry.js";
 export * from "./ip.js";
