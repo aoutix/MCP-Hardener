@@ -1,0 +1,26 @@
+{
+  "name": "hmcp-gen",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "bin": {
+    "hmcp-gen": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "templates"
+  ],
+  "dependencies": {
+    "@hmcp/core": "0.1.0",
+    "@hmcp/scanner": "0.1.0",
+    "@apidevtools/swagger-parser": "^13.0.0",
+    "swagger2openapi": "^7.0.8",
+    "commander": "^15.0.0",
+    "yaml": "^2.7.0",
+    "@hmcp/server-runtime": "0.1.0"
+  }
+}
