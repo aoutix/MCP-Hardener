@@ -8,4 +8,5 @@ export * from "./exposure.js";
 export * from "./resolve.js";
 export * from "./registry.js";
 export * from "./audit.js";
+export * from "./approvals.js";
 export * from "./ip.js";
