@@ -1,0 +1,14 @@
+{
+  "name": "hmcp",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "bin": { "hmcp": "./dist/cli.js" },
+  "files": ["dist"],
+  "dependencies": {
+    "@hmcp/core": "0.1.0",
+    "@hmcp/scanner": "0.1.0",
+    "commander": "^15.0.0",
+    "yaml": "^2.7.0"
+  }
+}
