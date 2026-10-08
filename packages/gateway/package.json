@@ -1,0 +1,25 @@
+{
+  "name": "hmcp-gateway",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "bin": {
+    "hmcp-gateway": "./dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "dependencies": {
+    "@hmcp/core": "0.1.0",
+    "@hmcp/scanner": "0.1.0",
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "commander": "^15.0.0",
+    "yaml": "^2.7.0",
+    "zod": "^4.0.0",
+    "@hmcp/server-runtime": "0.1.0"
+  }
+}
