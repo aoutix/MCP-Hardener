@@ -1,0 +1,53 @@
+{
+  "swagger": "2.0",
+  "info": { "title": "Legacy Orders", "version": "1.0.0" },
+  "host": "legacy.example.com",
+  "basePath": "/api/v1",
+  "schemes": ["https"],
+  "securityDefinitions": {
+    "apiKey": { "type": "apiKey", "name": "X-Api-Key", "in": "header" }
+  },
+  "security": [{ "apiKey": [] }],
+  "paths": {
+    "/orders": {
+      "get": {
+        "operationId": "listOrders",
+        "summary": "List orders.",
+        "parameters": [
+          { "name": "per_page", "in": "query", "type": "integer", "maximum": 500 },
+          { "name": "status", "in": "query", "type": "string", "enum": ["open", "closed"] }
+        ],
+        "responses": { "200": { "description": "Orders." } }
+      },
+      "post": {
+        "operationId": "createOrder",
+        "summary": "Create an order.",
+        "parameters": [
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "type": "object",
+              "required": ["sku"],
+              "properties": {
+                "sku": { "type": "string" },
+                "quantity": { "type": "integer" },
+                "notes": { "type": "string" }
+              }
+            }
+          }
+        ],
+        "responses": { "201": { "description": "Created." } }
+      }
+    },
+    "/orders/{orderId}": {
+      "delete": {
+        "operationId": "deleteOrder",
+        "summary": "Delete an order.",
+        "parameters": [{ "name": "orderId", "in": "path", "required": true, "type": "string" }],
+        "responses": { "204": { "description": "Deleted." } }
+      }
+    }
+  }
+}
