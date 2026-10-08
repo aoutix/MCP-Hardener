@@ -1,0 +1,383 @@
+@import "tailwindcss";
+
+/*
+ * Semantic tokens, so an effect or a verdict is defined once. Every colour is
+ * paired with a text label in the markup: a refusal must never be identifiable
+ * by hue alone.
+ */
+@theme {
+  --color-ink: oklch(0.22 0.02 265);
+  --color-ink-soft: oklch(0.55 0.02 265);
+  --color-ink-faint: oklch(0.68 0.015 265);
+  --color-surface: oklch(0.975 0 0);
+  --color-backdrop: oklch(0.89 0 0);
+  --color-panel: oklch(1 0 0);
+  --color-subtle: oklch(0.975 0.003 265);
+  --color-edge: oklch(0.922 0.004 265);
+
+  --color-accent: oklch(0.58 0.13 158);
+  --color-accent-strong: oklch(0.42 0.11 158);
+  --color-accent-soft: oklch(0.965 0.03 158);
+  --color-mint: oklch(0.84 0.14 160);
+
+  --color-allow: oklch(0.55 0.13 158);
+  --color-approve: oklch(0.58 0.13 68);
+  --color-deny: oklch(0.55 0.17 33);
+
+  --color-read: oklch(0.34 0.015 265);
+  --color-write: oklch(0.58 0.13 68);
+  --color-destructive: oklch(0.55 0.17 33);
+
+  --color-high: oklch(0.55 0.17 33);
+  --color-medium: oklch(0.58 0.13 68);
+  --color-low: oklch(0.55 0.02 265);
+}
+
+html, body, #root { height: 100%; }
+/*
+ * Light only. Declared so form controls, scrollbars and the canvas stay light
+ * even when the OS is set to dark; there is no dark palette to fall back to.
+ */
+html { color-scheme: light; }
+body {
+  margin: 0;
+  color: var(--color-ink);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  /*
+   * Strictly neutral (chroma 0) — anything hued would show straight through
+   * the glass as a tint. The luminance range is wide enough that both frosted
+   * panes have something to refract and read as glass rather than as paint.
+   */
+  background:
+    radial-gradient(820px 680px at 4% 2%, oklch(1 0 0), transparent 62%),
+    radial-gradient(700px 720px at 0% 100%, oklch(0.82 0 0 / 90%), transparent 64%),
+    radial-gradient(900px 820px at 100% 100%, oklch(0.85 0 0 / 80%), transparent 58%),
+    radial-gradient(760px 640px at 62% 34%, oklch(0.97 0 0 / 80%), transparent 66%),
+    var(--color-backdrop);
+  background-attachment: fixed;
+}
+code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+/*
+ * The frosted surface, shared by both panes. Because they are the same glass
+ * over the same backdrop, they match each other by construction rather than by
+ * two colours being kept in sync. The lit edge is a background layer rather
+ * than a pseudo-element, so it does not paint over the pane's own content.
+ */
+.glass {
+  background:
+    /* A fine greyscale grain, which is what separates frosted glass from a
+       merely translucent sheet. Neutral, so it tints nothing. */
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.17'/%3E%3C/svg%3E"),
+    /* Thin enough to see past. Frosted glass is defined by what survives it —
+       whatever is behind has to arrive as recognisable shape and colour, just
+       softened. White is what prevents that, so there is very little of it
+       here; the pane stays light because the backdrop behind it is light. */
+    linear-gradient(158deg, oklch(1 0 0 / 3%) 0%, oklch(1 0 0 / 1.5%) 42%, transparent 100%);
+  background-size: 180px 180px, auto, auto;
+  /*
+   * 9px. The radius is the whole difference between frosted glass and a
+   * translucent sheet of plastic: wide enough to defocus, narrow enough that
+   * the rail still shows the table rows it overlaps as legible shapes. Past
+   * ~30px everything behind collapses into one even field and the pane reads
+   * as paint no matter how little white it carries.
+   */
+  backdrop-filter: blur(3.5px) saturate(145%);
+  -webkit-backdrop-filter: blur(3.5px) saturate(145%);
+  border: 1px solid oklch(1 0 0 / 55%);
+  box-shadow:
+    inset 0 1px 0 oklch(1 0 0 / 75%),
+    inset 0 -1px 0 oklch(1 0 0 / 25%),
+    0 18px 44px -18px oklch(0.2 0 0 / 22%);
+}
+
+/*
+ * Rail-only behaviour. Hinged at its left edge, so on hover the right edge
+ * swings toward the viewer and the pane leans out over the content beside it.
+ * The scale stays small because the depth comes from the rotation and the cast
+ * shadow, not from size — a large scale would just overflow the window.
+ */
+.rail {
+  /* At rest it sits under the content card; on hover it rises above it. */
+  position: relative;
+  z-index: 0;
+  transform-origin: left center;
+  transform: perspective(1600px);
+  transition:
+    transform 460ms cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 460ms cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform;
+}
+.rail:hover {
+  z-index: 30;
+  /*
+   * The negative translate trims most of the width the scale and rotation add,
+   * leaving the rail covering a little less of the card (~36px) than the card
+   * covers of it at rest (48px).
+   */
+  transform: perspective(1600px) translateX(-10px) scale(1.025) rotateY(-6deg);
+  border-color: oklch(1 0 0 / 65%);
+  box-shadow:
+    inset 0 1px 0 oklch(1 0 0 / 90%),
+    inset 0 -1px 0 oklch(1 0 0 / 40%),
+    /* the shadow it casts sideways onto the pane it is leaning over */
+    38px 0 60px -28px oklch(0.2 0 0 / 38%),
+    0 34px 70px -24px oklch(0.2 0 0 / 34%);
+}
+/*
+ * The content card is the other half of the hinge. While the rail is hovered
+ * it settles back and away from the seam; when the pointer leaves, it rides
+ * back up on a curve with a little overshoot, so the return reads as the card
+ * rising rather than as the rail merely dropping.
+ */
+.stage-main {
+  /* Centre origin, so depth is expressed as travel along z: negative moves it
+     back and shrinks it away from the seam, positive brings it forward and
+     widens it over the rail. */
+  transform-origin: center;
+  position: relative;
+  z-index: 10;
+  will-change: transform;
+  transition:
+    transform 560ms cubic-bezier(0.34, 1.28, 0.5, 1),
+    box-shadow 560ms ease,
+    filter 560ms ease;
+}
+/* Rail hovered: the card swings back at an angle — its far edge tips away and
+   the whole pane drops along z, so it recedes into the distance rather than
+   merely shrinking. The depth is tuned so its near edge still clears the seam
+   by ~14px, which is what lets the rail cover it. */
+.rail:hover ~ .stage-main {
+  transform: perspective(1400px) translateZ(-60px) rotateY(2.6deg);
+  filter: brightness(0.955);
+  box-shadow: 0 8px 24px -16px oklch(0.2 0 0 / 18%);
+  transition:
+    transform 460ms cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 460ms ease,
+    filter 460ms ease;
+}
+/* Card hovered: the mirror image — it rises toward the viewer and spreads
+   further over the rail (~55px, against the 48px it covers at rest). */
+.stage-main:hover {
+  z-index: 30;
+  /* The mirror of the above: the near edge tips toward the viewer and leans
+     out over the rail. */
+  transform: perspective(1400px) translateZ(12px) rotateY(1.6deg);
+  box-shadow:
+    -30px 0 56px -26px oklch(0.2 0 0 / 38%),
+    0 30px 64px -24px oklch(0.2 0 0 / 30%);
+  transition:
+    transform 460ms cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 460ms ease;
+}
+/* ...and the rail is what gives way, pulling its edge back out from under it. */
+.stage:has(.stage-main:hover) .rail {
+  transform: perspective(1600px) scale(0.978);
+  filter: brightness(0.955);
+  box-shadow:
+    inset 0 1px 0 oklch(1 0 0 / 60%),
+    0 10px 26px -18px oklch(0.2 0 0 / 18%);
+  transition:
+    transform 460ms cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 460ms ease,
+    filter 460ms ease;
+}
+
+/*
+ * The scrim behind a dialog. It deliberately does almost nothing: a faint
+ * neutral dim and no blur at all. Blurring here was the mistake — it put the
+ * whole console out of focus, and worse, it flattened everything behind the
+ * dialog into an even smear, which left the dialog's own glass with no
+ * structure to refract and so no way to read as glass. The page stays sharp;
+ * the dialog is the only thing frosting it.
+ */
+/*
+ * While the dialog is open the page behind it goes soft. Kept to 7px: the
+ * dialog itself is near-clear glass, and whatever the scrim does to the page
+ * is what the dialog then transmits — blur it hard and the panel fills with an
+ * even smear and stops reading as glass at all. At this radius the console is
+ * plainly out of focus but its shapes still travel through the panel.
+ */
+.modal-scrim {
+  background: oklch(0.55 0 0 / 14%);
+  backdrop-filter: blur(1.75px) saturate(105%);
+  -webkit-backdrop-filter: blur(1.75px) saturate(105%);
+}
+/*
+ * The dialog is the same glass as the panes, thinner. Almost all of its
+ * presence comes from the blur and the lit edge rather than from white: at 22%
+ * the console's shapes and colour still travel through it, which is what makes
+ * it frost rather than a pale card. Text stays legible because the blur radius
+ * is wide enough to destroy the detail underneath while keeping its luminance.
+ */
+.glass-modal {
+  background:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.16'/%3E%3C/svg%3E"),
+    linear-gradient(158deg, oklch(1 0 0 / 10%) 0%, oklch(1 0 0 / 7%) 42%, oklch(1 0 0 / 5%) 100%);
+  background-size: 180px 180px, auto, auto;
+  /*
+   * This one floats over the function table and has to stay readable against
+   * it, so the backdrop is conditioned rather than covered. `contrast` is what
+   * does the work: it compresses whatever is behind the panel toward its own
+   * mid-tone, flattening the dark table text into the light field around it,
+   * and `brightness` then lifts the whole result. Together they hand the
+   * dialog's own text an even, pale ground to sit on — without the white that
+   * would turn the panel back into a card.
+   */
+  backdrop-filter: blur(20px) saturate(135%) contrast(0.72) brightness(1.2);
+  -webkit-backdrop-filter: blur(20px) saturate(135%) contrast(0.72) brightness(1.2);
+  border: 1px solid oklch(1 0 0 / 60%);
+  box-shadow:
+    inset 0 1px 0 oklch(1 0 0 / 80%),
+    inset 0 -1px 0 oklch(1 0 0 / 28%),
+    0 30px 72px -22px oklch(0.2 0 0 / 42%);
+  /* Its own perspective, as on the nav items: the panel has to rise toward the
+     viewer rather than merely grow, and the scrim's flat stack gives it no
+     perspective to inherit. */
+  transform-origin: center;
+  will-change: transform;
+  transition:
+    transform 420ms cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 420ms ease,
+    border-color 420ms ease;
+}
+/*
+ * Lifts off the scrim on hover, at the scale the rail moves at rather than the
+ * nav items' — this is a whole pane, and the gesture has to be legible as one.
+ * The travel is along z, so it grows as it rises; the shadow spreading and
+ * softening beneath it is what sells the height, and the glass brightens
+ * slightly as it comes away from the page it was resting on.
+ */
+.glass-modal:not(.glass-pop):hover {
+  transform: perspective(1100px) translateZ(52px);
+  border-color: oklch(1 0 0 / 78%);
+  box-shadow:
+    inset 0 1px 0 oklch(1 0 0 / 95%),
+    inset 0 -1px 0 oklch(1 0 0 / 40%),
+    0 60px 120px -28px oklch(0.2 0 0 / 55%);
+}
+/* Inside the dialog the rules are the same glass, so they must not be the flat
+   opaque edge colour, which would read as a seam on a solid card. */
+.glass-modal .modal-rule { border-color: oklch(1 0 0 / 45%); }
+
+.glass-item {
+  background: linear-gradient(160deg, oklch(1 0 0 / 62%), oklch(1 0 0 / 34%));
+  box-shadow:
+    inset 0 1px 0 oklch(1 0 0 / 80%),
+    0 2px 6px -2px oklch(0.2 0 0 / 14%);
+}
+/*
+ * Selection on the rail is a green pane rather than a flat fill, so it still
+ * reads as part of the glass. Hover is the lighter step below it, and a
+ * hovered selection deepens once more.
+ */
+.nav-selected {
+  background: linear-gradient(160deg, oklch(0.58 0.13 158 / 30%), oklch(0.58 0.13 158 / 17%));
+  box-shadow:
+    inset 0 1px 0 oklch(1 0 0 / 55%),
+    0 2px 6px -2px oklch(0.2 0 0 / 14%);
+}
+.nav-selected:hover {
+  background: linear-gradient(160deg, oklch(0.58 0.13 158 / 42%), oklch(0.58 0.13 158 / 26%));
+}
+
+.nav-item {
+  transform-origin: left center;
+  transition:
+    transform 260ms cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 260ms ease,
+    background-color 180ms ease,
+    color 180ms ease;
+}
+/* Its own perspective, so the item rises toward the viewer rather than merely
+   growing — the rail's perspective does not reach it through the flat layers. */
+.nav-item:hover {
+  transform: perspective(600px) translateZ(26px);
+  box-shadow: 0 10px 22px -12px oklch(0.2 0 0 / 35%);
+}
+.nav-item:active { transform: perspective(600px) translateZ(8px); }
+
+/*
+ * The exposure switch. The knob travels on a transform rather than on a flex
+ * alignment: `justify-content` has nothing to interpolate, so aligning the knob
+ * with `justify-start`/`justify-end` made it teleport between the two ends no
+ * matter what was in the transition list. The curve overshoots slightly at the
+ * far end, which is what makes a 14px throw read as a switch being thrown
+ * rather than as a dot appearing somewhere else.
+ */
+.switch-track {
+  transition:
+    background-color 240ms ease,
+    box-shadow 240ms ease;
+}
+.switch-knob { transition: transform 320ms cubic-bezier(0.34, 1.5, 0.56, 1); }
+.switch-on .switch-knob { transform: translateX(14px); }
+/*
+ * A ring that grows out of the track and fades over the length of the throw.
+ * The switch is 32px wide in a dense table, and without this the only thing
+ * confirming the click is a movement smaller than the cursor — the bloom is
+ * what makes the change legible from wherever the eye happens to be.
+ */
+.switch-bloom-on { animation: switch-bloom-on 560ms ease-out; }
+@keyframes switch-bloom-on {
+  from { box-shadow: 0 0 0 0 oklch(0.42 0.11 158 / 50%); }
+  to   { box-shadow: 0 0 0 9px oklch(0.42 0.11 158 / 0%); }
+}
+.switch-bloom-off { animation: switch-bloom-off 560ms ease-out; }
+@keyframes switch-bloom-off {
+  from { box-shadow: 0 0 0 0 oklch(0.55 0.02 265 / 42%); }
+  to   { box-shadow: 0 0 0 9px oklch(0.55 0.02 265 / 0%); }
+}
+
+/*
+ * The row the switch belongs to washes over once in the colour of the direction
+ * it moved. Painted as a filled inset shadow rather than as a background, so it
+ * layers over whatever the row's own selected/hover background is instead of
+ * replacing it for the length of the animation and snapping back at the end.
+ */
+.row-flash-on { animation: row-flash-on 820ms ease-out; }
+@keyframes row-flash-on {
+  from { box-shadow: inset 0 0 0 9999px oklch(0.58 0.13 158 / 20%); }
+  to   { box-shadow: inset 0 0 0 9999px oklch(0.58 0.13 158 / 0%); }
+}
+.row-flash-off { animation: row-flash-off 820ms ease-out; }
+@keyframes row-flash-off {
+  from { box-shadow: inset 0 0 0 9999px oklch(0.55 0.02 265 / 18%); }
+  to   { box-shadow: inset 0 0 0 9999px oklch(0.55 0.02 265 / 0%); }
+}
+
+/*
+ * A row held in a tab it no longer matches, because it stopped matching under
+ * the pointer. It carries no animation of its own — the flash classes above are
+ * also `animation`, and the two would overwrite each other on the one row that
+ * is always both at once. The dashed rule is what says it is being kept rather
+ * than counted.
+ */
+
+@media (prefers-reduced-motion: reduce) {
+  .glass, .rail, .nav-item, .stage-main, .glass-modal { transition: none; }
+  .switch-track, .switch-knob { transition: none; }
+  .switch-bloom-on,
+  .switch-bloom-off,
+  .row-flash-on,
+  .row-flash-off { animation: none; }
+  .rail:hover,
+  .glass-modal:hover,
+  .nav-item:hover,
+  .nav-item:active,
+  .stage-main:hover,
+  .rail:hover ~ .stage-main,
+  .stage:has(.stage-main:hover) .rail { transform: none; }
+  .rail:hover ~ .stage-main,
+  .stage:has(.stage-main:hover) .rail { filter: none; }
+}
+/* Quiet scrollbars, so the inner scroll regions do not cut the layout up. */
+* { scrollbar-width: thin; scrollbar-color: var(--color-edge) transparent; }
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-thumb {
+  background: var(--color-edge);
+  border: 3px solid transparent;
+  background-clip: content-box;
+  border-radius: 999px;
+}
