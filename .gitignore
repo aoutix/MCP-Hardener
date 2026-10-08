@@ -1,0 +1,45 @@
+# Dependencies and build output
+node_modules/
+dist/
+dist-ui/
+*.tsbuildinfo
+coverage/
+
+# Secrets. `.env.example` is the documented template and is meant to be
+# committed, so it is exempted — everything else matching is not.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.cert
+*.crt
+secrets.json
+credentials.json
+
+# Local runtime state. The console keeps its registry, approvals and audit
+# trail in ~/.hmcp, but a server generated into the tree would put the same
+# things here, and the audit log in particular is a record of real calls.
+*.jsonl
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+.hmcp/
+
+# Generated servers. Output of `hmcp-gen build`, rebuilt from a spec and a
+# manifest, and it carries the upstream base URL it was pointed at.
+/out/
+*-mcp/
+
+# Scratch
+/tmp/
+*.log
+
+# Editor and OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
