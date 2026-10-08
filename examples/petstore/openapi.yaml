@@ -1,0 +1,139 @@
+openapi: 3.0.3
+info:
+  title: Petstore
+  version: 1.2.0
+  description: A small, well-behaved API used as the clean generator example.
+servers:
+  - url: https://api.petstore.example.com/v1
+security:
+  - bearerAuth: []
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  schemas:
+    Pet:
+      type: object
+      required: [name]
+      properties:
+        id:
+          type: integer
+          description: Server-assigned identifier.
+        name:
+          type: string
+          maxLength: 80
+          description: The pet's name.
+        status:
+          type: string
+          enum: [available, pending, sold]
+        tags:
+          type: array
+          maxItems: 10
+          items:
+            type: string
+            maxLength: 32
+paths:
+  /pets:
+    get:
+      operationId: listPets
+      summary: List pets.
+      tags: [pets]
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [available, pending, sold]
+        - name: limit
+          in: query
+          description: Maximum number of pets to return.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+      responses:
+        "200":
+          description: A page of pets.
+    post:
+      operationId: createPet
+      summary: Add a pet to the store.
+      tags: [pets]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Pet"
+      responses:
+        "201":
+          description: The created pet.
+  /pets/{petId}:
+    parameters:
+      - name: petId
+        in: path
+        required: true
+        schema:
+          type: integer
+    get:
+      operationId: getPet
+      summary: Fetch one pet by id.
+      tags: [pets]
+      responses:
+        "200":
+          description: The pet.
+    patch:
+      operationId: updatePet
+      summary: Update a pet.
+      tags: [pets]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Pet"
+      responses:
+        "200":
+          description: The updated pet.
+    delete:
+      operationId: deletePet
+      summary: Remove a pet from the store.
+      tags: [pets]
+      responses:
+        "204":
+          description: Deleted.
+  /pets/search:
+    post:
+      operationId: searchPets
+      summary: Search pets with a structured query.
+      tags: [pets]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                query:
+                  type: string
+                  maxLength: 200
+                limit:
+                  type: integer
+                  maximum: 50
+      responses:
+        "200":
+          description: Matching pets.
+  /store/inventory:
+    get:
+      operationId: getInventory
+      summary: Inventory counts by status.
+      tags: [store]
+      responses:
+        "200":
+          description: Counts.
+    delete:
+      operationId: purgeInventory
+      summary: Delete all inventory records.
+      tags: [store]
+      responses:
+        "204":
+          description: Purged.

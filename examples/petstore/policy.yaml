@@ -1,0 +1,59 @@
+version: 1
+name: petstore-read-only
+
+# Reads pass, writes are held for a human, and deletes are refused outright.
+defaults:
+  mode: read-only
+  on_unclassified: deny
+
+rules:
+  # `search_pets` is a POST that only reads. Reclassifying it here, by a named
+  # rule, is deliberate - the generator refuses to guess this.
+  - id: search-is-a-read
+    match: search_pets
+    effect: read
+    decision: allow
+
+  - id: create-pet-needs-approval
+    match: create_pet
+    effect: write
+    decision: approve
+    reason: adding a pet is reversible but still changes the store
+
+  - id: update-pet-needs-approval
+    match: update_pet
+    effect: write
+    decision: approve
+
+  # Named explicitly so the refusal reads clearly in the log, rather than
+  # falling through to the posture.
+  - id: no-deletes
+    match: "delete_*"
+    decision: deny
+    reason: this deployment never deletes pets
+
+  - id: never-purge
+    match: purge_*
+    decision: deny
+    reason: bulk deletion is not available to agents
+
+egress:
+  allow: ["api.petstore.example.com"]
+  methods: [GET, POST, PATCH]
+  max_body_bytes: 1048576
+  timeout_ms: 10000
+  max_redirects: 0
+  block_private_ips: true
+
+approvals:
+  mode: both
+  ttl_seconds: 300
+  single_use: true
+  store_path: ~/.hmcp/approvals.sqlite
+
+audit:
+  enabled: true
+  path: ~/.hmcp/audit.jsonl
+  hash_chain: true
+
+tool_budget: 20
