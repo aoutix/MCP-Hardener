@@ -1,0 +1,41 @@
+{
+  "name": "@hmcp/web",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "bin": {
+    "hmcp-web": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "dist-ui"
+  ],
+  "scripts": {
+    "build:ui": "vite build ui --config ui/vite.config.ts",
+    "typecheck:ui": "tsc -p ui/tsconfig.json",
+    "dev:ui": "vite ui --config ui/vite.config.ts"
+  },
+  "dependencies": {
+    "@hmcp/core": "0.1.0",
+    "@hmcp/server-runtime": "0.1.0",
+    "@hmcp/scanner": "0.1.0",
+    "hmcp-gateway": "0.1.0",
+    "commander": "^15.0.0",
+    "yaml": "^2.7.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "tailwindcss": "^4.0.0",
+    "@tailwindcss/vite": "^4.0.0",
+    "vite": "^8.0.0"
+  }
+}
