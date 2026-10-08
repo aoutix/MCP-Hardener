@@ -1,0 +1,52 @@
+version: 1
+name: gateway-read-only
+
+# Nothing is reachable until it is classified. An upstream that adds a new tool
+# tomorrow does not get to use it today.
+defaults:
+  mode: read-only
+  on_unclassified: deny
+
+rules:
+  # Reads from any upstream.
+  - id: allow-reads
+    match: "*__{get,list,read,search,fetch,describe}_*"
+    effect: read
+    decision: allow
+
+  # Writes need a human. The decision is recorded against this rule id.
+  - id: approve-writes
+    match: "*__{create,update,add,set,write,send}_*"
+    effect: write
+    decision: approve
+
+  # Deletes are refused outright rather than held, because an approval prompt
+  # for a delete is a prompt people learn to click through.
+  - id: refuse-deletes
+    match: "*__{delete,remove,destroy,purge,drop,revoke}_*"
+    effect: destructive
+    decision: deny
+    reason: destructive operations are not available through this gateway
+
+egress:
+  # Applies to HTTP upstreams. A stdio upstream is a child process and is
+  # governed by what you put in gateway.yaml instead.
+  allow: ["mcp.example.com"]
+  methods: [GET, POST]
+  max_body_bytes: 2097152
+  timeout_ms: 15000
+  max_redirects: 0
+  block_private_ips: true
+
+approvals:
+  mode: both
+  ttl_seconds: 300
+  single_use: true
+  store_path: ~/.hmcp/approvals.sqlite
+
+audit:
+  enabled: true
+  path: ~/.hmcp/audit.jsonl
+  hash_chain: true
+
+tool_budget: 60

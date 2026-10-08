@@ -1,0 +1,35 @@
+version: 1
+name: hmcp-gateway
+
+# The gateway sits between an agent and MCP servers you did not generate and may
+# not control. It applies the same policy, approvals, egress limits and audit log
+# that a generated server applies.
+policy: ./policy.yaml
+
+upstreams:
+  # A local server started as a child process. It inherits nothing from the
+  # gateway's environment except what is named here, so the gateway's own
+  # credentials are not handed to every upstream.
+  - name: notes
+    transport: stdio
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-everything"]
+    pass_env: []
+
+  # A remote server over Streamable HTTP. Its URL is checked against
+  # egress.allow and resolved against private address space before a connection
+  # is opened, so an upstream cannot point the gateway at an internal host.
+  # - name: tickets
+  #   transport: http
+  #   url: https://mcp.example.com/mcp
+  #   headers:
+  #     authorization: Bearer ${TICKETS_TOKEN}
+
+# What to do about an upstream tool whose description carries injected
+# instructions. `strip` replaces the text and keeps the tool usable, `deny`
+# hides the tool, `annotate` labels the text as untrusted and leaves it.
+on_injection: strip
+
+# Prefix tool names with `<server>__` so two upstreams cannot collide and the
+# audit log always says which server a call went to.
+namespace: true
