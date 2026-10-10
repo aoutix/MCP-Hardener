@@ -82,6 +82,61 @@ function computeHash(record: Omit<AuditRecord, "hash">): string {
   return sha256(record.prev_hash, canonicalJson({ ...record, hash: undefined }));
 }
 
+/**
+ * Who a record says made the call.
+ *
+ * One column holds three very different kinds of answer: an operating-system
+ * user (a human at a console or a terminal), the literal "agent" for a server
+ * that serves one client and has no identity to offer, and — once a gateway
+ * verifies a caller's token — whoever that token names.
+ *
+ * Only the last of those is chosen by someone outside the deployment, which
+ * is why only the last is namespaced. A token minted with `sub: "aditya"`
+ * must not produce a line indistinguishable from a human's console approval,
+ * and a reserved prefix is what makes that forgery unrepresentable rather
+ * than merely unlikely. Prefixing the operator too would churn stored history
+ * to protect against nobody.
+ */
+
+/** A server with one client and no caller identity to claim. */
+export const ACTOR_AGENT = "agent";
+
+/** The gateway process itself: startup findings, structural refusals. */
+export const ACTOR_GATEWAY = "gateway";
+
+/**
+ * A token that verified but named no subject.
+ *
+ * Deliberately not "unknown", which already means "could not name the
+ * operating-system user". This says something narrower and truer: the token
+ * proved a *tenant*, not an identity.
+ */
+export const ACTOR_ANONYMOUS = "token:anonymous";
+
+/** The longest actor recorded. Generous for a subject, short of a payload. */
+const MAX_ACTOR = 128;
+
+/**
+ * The actor for a caller named by a verified token.
+ *
+ * The subject is not quoted anywhere it could be mistaken for structure, but
+ * it is interpolated into prose reasons in the console and the admin API, so
+ * it is flattened to one line and capped here rather than at each use.
+ *
+ * The tenant is deliberately *not* folded in: every record already carries a
+ * `tenant` column, and `(tenant, actor)` is the real key. Nor is the issuer,
+ * which is pinned to one value per deployment. If multiple issuers ever
+ * become possible the format grows to `token:<iss>#<sub>`.
+ */
+export function tokenActor(subject: string | undefined): string {
+  if (subject === undefined) return ACTOR_ANONYMOUS;
+  // eslint-disable-next-line no-control-regex
+  const flat = subject.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim();
+  if (flat.length === 0) return ACTOR_ANONYMOUS;
+  const capped = flat.length > MAX_ACTOR ? `${flat.slice(0, MAX_ACTOR - 1)}\u2026` : flat;
+  return `token:${capped}`;
+}
+
 export interface AuditLogOptions {
   readonly config: AuditConfig;
   readonly actor?: string;
