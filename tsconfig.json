@@ -1,8 +1,19 @@
 {
   "files": [],
+  "//": [
+    "Every package, not just the ones nothing depends on. `tsc --build` walks each",
+    "reference's own references, so listing the four leaves would be enough to reach",
+    "all seven — but a package dropped from the graph would then stop being built",
+    "silently, which is how this file came to reference `core` alone and `npm run",
+    "build` came to compile one package out of seven while reporting success."
+  ],
   "references": [
-    {
-      "path": "packages/core"
-    }
+    { "path": "packages/core" },
+    { "path": "packages/runtime" },
+    { "path": "packages/scanner" },
+    { "path": "packages/generator" },
+    { "path": "packages/gateway" },
+    { "path": "packages/cli" },
+    { "path": "packages/web" }
   ]
 }
