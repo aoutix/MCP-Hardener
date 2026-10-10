@@ -372,3 +372,19 @@ describe("the console's exposure switch, over a gateway", () => {
     }
   });
 });
+
+describe("attribution over stdio", () => {
+  it("still says 'agent', because there is nobody else to name", async () => {
+    // One client, no token, no identity on offer. Namespacing this would
+    // imply the gateway knows something it does not.
+    const h = await harness();
+    try {
+      await h.client.callTool({ name: "notes__get_note", arguments: { id: "n1" } });
+      await h.close();
+      const call = readAuditLog(join(dir, "audit.jsonl")).find((r) => r.tool === "notes__get_note");
+      expect(call?.actor).toBe("agent");
+    } finally {
+      await h.close().catch(() => undefined);
+    }
+  });
+});

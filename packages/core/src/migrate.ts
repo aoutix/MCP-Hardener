@@ -1,4 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
+import { RUNTIME_STATE_SCHEMA } from "./runtime-state.js";
 
 /**
  * Schema versioning for the approvals database.
@@ -90,6 +91,18 @@ const MIGRATIONS: readonly Migration[] = [
        * column there would be the wrong axis and would cost a second rebuild
        * to say nothing.
        */
+    }
+  },
+  {
+    name: "create runtime_state for databases versioned before it existed",
+    up(db) {
+      /*
+       * The table arrived after versioning did, so a database already stamped
+       * version 1 was never given it and the console failed on first read with
+       * `no such table`. Fresh databases get it from `createLatest`; this is
+       * the same statement for the ones that do not.
+       */
+      db.exec(RUNTIME_STATE_SCHEMA);
     }
   }
 ];

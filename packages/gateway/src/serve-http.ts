@@ -1,9 +1,9 @@
 import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from "node:http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { randomUUID } from "node:crypto";
-import { HttpError, TenantError, TenantVerifier, bearerToken } from "@hmcp/core";
+import { HttpError, TenantError, TenantVerifier, bearerToken, tokenActor } from "@hmcp/core";
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
-import type { Gateway } from "./gateway.js";
+import type { Gateway, GatewayAuthExtra } from "./gateway.js";
 
 /**
  * Serving the gateway over HTTP instead of stdio.
@@ -209,12 +209,11 @@ export async function serveHttp(gateway: Gateway, options: ServeHttpOptions): Pr
       }
       try {
         const claim = await verifier.verify(token);
-        auth = {
-          token,
-          clientId: claim.subject ?? "unknown",
-          scopes: [],
-          extra: { tenant: claim.tenant }
-        };
+        // Computed once. `clientId` carries the same value rather than a
+        // second, differently-formatted copy of "who is calling".
+        const actor = tokenActor(claim.subject);
+        const extra: GatewayAuthExtra = { tenant: claim.tenant, actor };
+        auth = { token, clientId: actor, scopes: [], extra: { ...extra } };
       } catch (err) {
         if (err instanceof TenantError) {
           send(res, 403, "forbidden", err.message);

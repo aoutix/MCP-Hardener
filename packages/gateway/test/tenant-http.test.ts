@@ -294,3 +294,83 @@ describe("refusing to start at all", () => {
     await expect(serveHttp(gateway, { port: 0 })).rejects.toThrow(/jwt-verified/);
   });
 });
+
+describe("which agent made the call", () => {
+  async function auditFor(tool: string) {
+    const { readAuditLog } = await import("@hmcp/core");
+    return readAuditLog(join(dir, "audit.jsonl")).filter((r) => r.tool === tool);
+  }
+
+  it("names the caller from the token's subject", async () => {
+    await boot();
+    const client = await connect(await token({ org_id: "acme", sub: "agent-7" }));
+    await client.callTool({ name: "notes__get_note", arguments: { id: "n1" } });
+
+    const [call] = await auditFor("notes__get_note");
+    expect(call?.actor).toBe("token:agent-7");
+    expect(call?.tenant).toBe("acme");
+  });
+
+  it("tells two agents of the same customer apart", async () => {
+    // The whole point: "by which agent", not just "by which tenant".
+    await boot();
+    const a = await connect(await token({ org_id: "acme", sub: "agent-7" }));
+    const b = await connect(await token({ org_id: "acme", sub: "agent-9" }));
+    await a.callTool({ name: "notes__get_note", arguments: { id: "n1" } });
+    await b.callTool({ name: "notes__get_note", arguments: { id: "n2" } });
+
+    const calls = await auditFor("notes__get_note");
+    expect(calls.map((r) => r.actor).sort()).toEqual(["token:agent-7", "token:agent-9"]);
+    expect(new Set(calls.map((r) => r.tenant))).toEqual(new Set(["acme"]));
+  });
+
+  it("says the token named nobody, rather than guessing", async () => {
+    await boot();
+    const client = await connect(await token({ org_id: "acme" }));
+    await client.callTool({ name: "notes__get_note", arguments: { id: "n1" } });
+
+    const [call] = await auditFor("notes__get_note");
+    // Not "unknown", which already means "could not name the OS user". The
+    // token proved a tenant, not an identity.
+    expect(call?.actor).toBe("token:anonymous");
+  });
+
+  it("flattens a hostile subject instead of letting it shape the log", async () => {
+    // `actor` is the one attacker-influenced field in a hash-chained record,
+    // and it is interpolated into prose reasons elsewhere.
+    await boot();
+    const nasty = `evil\nreviewer\u0000${"x".repeat(500)}`;
+    const client = await connect(await token({ org_id: "acme", sub: nasty }));
+    await client.callTool({ name: "notes__get_note", arguments: { id: "n1" } });
+
+    const [call] = await auditFor("notes__get_note");
+    expect(call?.actor.startsWith("token:evil reviewer")).toBe(true);
+    expect(call?.actor).not.toContain("\n");
+    expect(call!.actor.length).toBeLessThanOrEqual(134);
+
+    const { verifyAuditLog } = await import("@hmcp/core");
+    expect(verifyAuditLog(join(dir, "audit.jsonl")).ok).toBe(true);
+  });
+
+  it("attributes a refusal for a tool that does not exist", async () => {
+    // This record used to carry no actor, no tenant and no session, so
+    // probing a hosted gateway was unattributable to any customer.
+    await boot();
+    const client = await connect(await token({ org_id: "acme", sub: "agent-7" }));
+    await client.callTool({ name: "notes__no_such_tool", arguments: {} });
+
+    const [probe] = await auditFor("notes__no_such_tool");
+    expect(probe?.actor).toBe("token:agent-7");
+    expect(probe?.tenant).toBe("acme");
+    expect(probe?.session).toBeTruthy();
+    expect(probe?.rule_id).toBe("gateway.unknown-tool");
+  });
+
+  it("attributes its own startup findings to the gateway, not to whoever runs it", async () => {
+    await boot();
+    const { readAuditLog } = await import("@hmcp/core");
+    const startup = readAuditLog(join(dir, "audit.jsonl")).filter((r) => r.rule_id === "HMCP005");
+    expect(startup.length).toBeGreaterThan(0);
+    for (const record of startup) expect(record.actor).toBe("gateway");
+  });
+});

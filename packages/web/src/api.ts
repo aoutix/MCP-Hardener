@@ -555,6 +555,9 @@ export function buildRoutes(options: ApiOptions): Route[] {
         // reads one customer's history out of it. `?tenant=` with an empty
         // value selects the records that carry no tenant.
         ...(ctx.query.has("tenant") ? { tenant: csv(ctx.query, "tenant") ?? [""] } : {}),
+        // Recording which agent made a call is only half the requirement;
+        // without this it would be written down and unaskable.
+        ...(csv(ctx.query, "actor") ? { actor: csv(ctx.query, "actor")! } : {}),
         ...(ctx.query.get("tool") ? { tool: ctx.query.get("tool")! } : {}),
         ...(ctx.query.get("since") ? { since: ctx.query.get("since")! } : {}),
         ...(ctx.query.get("noteworthy") ? { noteworthy: true } : {})

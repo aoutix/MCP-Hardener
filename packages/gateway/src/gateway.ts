@@ -3,6 +3,8 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import {
+  ACTOR_AGENT,
+  ACTOR_GATEWAY,
   ApprovalBroker,
   ApprovalStore,
   AuditLog,
@@ -56,6 +58,18 @@ export interface GatewayOptions {
  * instance is passed in instead, and the two transports share one code path
  * rather than growing a second.
  */
+/**
+ * What the HTTP layer leaves on `AuthInfo.extra` for the handlers to read.
+ *
+ * Declared once and shared by producer and consumer. Both sides used to
+ * describe this shape inline and happened to agree; one structural guess is
+ * one too many for a value that decides which tenant a row is filed under.
+ */
+export interface GatewayAuthExtra {
+  readonly tenant: string;
+  readonly actor: string;
+}
+
 export interface CallContext {
   /** Whose rows in the approvals database this call reads and writes. */
   readonly scope: Scope;
@@ -65,6 +79,15 @@ export interface CallContext {
   readonly session: string;
   /** The `Server` this call arrived on, for elicitation back to that client. */
   readonly server: Server;
+  /**
+   * Who the audit record names.
+   *
+   * `token:<sub>` when a verified token identified the caller, and the bare
+   * literal `"agent"` over stdio, where there is one client and no identity
+   * on offer. The gateway used to write `"agent"` for everyone, which made
+   * every caller on a shared deployment look like the same one.
+   */
+  readonly actor: string;
   /**
    * The caller's own upstream credential, when they presented one.
    *
@@ -101,6 +124,15 @@ export class Gateway {
       config: options.policy.audit,
       session: this.session,
       component: this.component,
+      /*
+       * The gateway's own structural records -- startup injection findings,
+       * refusals for a tool that does not exist -- are made by this process,
+       * not by a person. Without this they fell through to HMCP_ACTOR, then
+       * $USER, and in a container that is `root` or `node`: a machine action
+       * filed under a name that reads as a human. Deliberately not
+       * overridable by the environment, which is the leak being closed.
+       */
+      actor: ACTOR_GATEWAY,
       cwd: options.cwd
     });
     this.approvalStore = new ApprovalStore(options.policy.approvals.store_path, options.cwd);
@@ -226,10 +258,20 @@ export class Gateway {
       // An unknown or hidden tool is refused identically, so probing cannot
       // distinguish "does not exist" from "policy hid it".
       if (!entry || entry.hidden) {
+        /*
+         * Attributed like any other refusal. This is a per-caller event --
+         * someone asked for a tool and was told no -- and it used to carry
+         * no actor, no tenant and no session at all, which on a hosted
+         * gateway made probing unattributable to any customer. It is the one
+         * place the missing attribution had a consequence beyond tidiness.
+         */
         this.audit.append({
           tool: request.params.name,
           decision: "deny",
           outcome: "denied",
+          actor: ctx.actor,
+          tenant: ctx.tenantValue ?? null,
+          session: ctx.session,
           rule_id: entry ? "HMCP005" : "gateway.unknown-tool",
           reason: entry ? "tool is hidden by gateway policy" : "no such tool"
         });
@@ -374,7 +416,8 @@ export class Gateway {
      * the request before it reaches a handler, so a call that gets here
      * without a tenant is one whose policy never wanted one.
      */
-    const auth = (extra as { authInfo?: { token?: string; extra?: { tenant?: unknown } } } | undefined)?.authInfo;
+    const auth = (extra as { authInfo?: { token?: string; extra?: Partial<GatewayAuthExtra> } } | undefined)
+      ?.authInfo;
     const perRequest = typeof auth?.extra?.tenant === "string" ? auth.extra.tenant : undefined;
     const tenantValue = perRequest ?? this.tenantValue;
     return {
@@ -382,6 +425,7 @@ export class Gateway {
       tenantValue,
       session,
       server,
+      actor: typeof auth?.extra?.actor === "string" ? auth.extra.actor : ACTOR_AGENT,
       credential: auth?.token ? { token: auth.token, tenant: tenantValue } : undefined
     };
   }
@@ -418,7 +462,7 @@ export class Gateway {
         audit: this.audit,
         approvals: this.broker(ctx),
         tenantValue: ctx.tenantValue,
-        actor: "agent",
+        actor: ctx.actor,
         session: ctx.session
       },
       {
