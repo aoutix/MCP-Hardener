@@ -94,7 +94,16 @@ export class Gateway {
       cwd: options.cwd
     });
     this.approvalStore = new ApprovalStore(options.policy.approvals.store_path, options.cwd);
-    this.tenantValue = options.policy.tenant ? requireTenant(options.policy.tenant) : undefined;
+    /*
+     * `jwt-verified` is resolved per request, from the caller's token, so
+     * there is deliberately nothing to resolve here. Every other kind is a
+     * property of the deployment and is resolved once, loudly, so a missing
+     * tenant fails at startup rather than becoming an unscoped call later.
+     */
+    this.tenantValue =
+      options.policy.tenant && options.policy.tenant.source.kind !== "jwt-verified"
+        ? requireTenant(options.policy.tenant)
+        : undefined;
 
     this.instructions =
       `Policy gateway in front of ${options.config.upstreams.length} MCP server(s). ` +
@@ -342,13 +351,33 @@ export class Gateway {
    * but the plumbing is here so that resolving it per request later is a
    * change to this one method rather than to every call path.
    */
-  private contextFor(server: Server, session: string, _extra: unknown): CallContext {
-    return {
-      scope: this.scopeFor(this.tenantValue),
-      tenantValue: this.tenantValue,
-      session,
-      server
-    };
+  private contextFor(server: Server, session: string, extra: unknown): CallContext {
+    /*
+     * A hosted gateway resolves the tenant per request: the HTTP layer
+     * verifies the caller's token and leaves the result on `extra.authInfo`,
+     * which is the SDK's designated slot for per-request credentials. Over
+     * stdio there is no such thing, and the value resolved at construction
+     * stands.
+     *
+     * `?? this.tenantValue` is not a fallback that could silently widen
+     * anything: when the policy uses `jwt-verified` the HTTP layer refuses
+     * the request before it reaches a handler, so a call that gets here
+     * without a tenant is one whose policy never wanted one.
+     */
+    const auth = (extra as { authInfo?: { extra?: { tenant?: unknown } } } | undefined)?.authInfo;
+    const perRequest = typeof auth?.extra?.tenant === "string" ? auth.extra.tenant : undefined;
+    const tenantValue = perRequest ?? this.tenantValue;
+    return { scope: this.scopeFor(tenantValue), tenantValue, session, server };
+  }
+
+  /** The tenant configuration this gateway runs under, for the HTTP layer. */
+  get tenantConfig(): Policy["tenant"] {
+    return this.policy.tenant;
+  }
+
+  /** The egress guard, so a JWKS fetch goes through the same checks. */
+  get egressGuard(): EgressGuard {
+    return this.egress;
   }
 
   private broker(ctx: CallContext): ApprovalBroker {

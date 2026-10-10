@@ -12,6 +12,16 @@ export interface TenantResolverOptions {
   /** Request headers, for the `header` source. Supplied per-call by the gateway. */
   readonly headers?: Record<string, string | string[] | undefined>;
   readonly env?: NodeJS.ProcessEnv;
+  /**
+   * Where the tenant is allowed to come from.
+   *
+   * `"process"` (the default) is a server bound to one tenant at startup.
+   * `"request"` is a hosted deployment resolving it per call, where the
+   * sources that trust their input are refused outright.
+   */
+  readonly trust?: "process" | "request";
+  /** The already-verified tenant, for the `jwt-verified` source. */
+  readonly verified?: string | undefined;
 }
 
 function decodeJwtClaim(token: string, claim: string): string | undefined {
@@ -40,6 +50,23 @@ export function resolveTenant(config: TenantConfig, options: TenantResolverOptio
   const env = options.env ?? process.env;
   const source = config.source;
 
+  /*
+   * A hosted deployment resolves the tenant from the request, so the sources
+   * that read their value from somewhere the caller can influence stop being
+   * safe. `header` is a value the caller simply types, and `jwt-claim`
+   * decodes without checking the signature -- both correct when the value
+   * comes from the operator's own environment, both forgeable when it does
+   * not. Refusing here makes that an enforced invariant rather than a comment
+   * someone has to read.
+   */
+  if (options.trust === "request" && (source.kind === "header" || source.kind === "jwt-claim")) {
+    throw new TenantError(
+      `tenant.source.kind "${source.kind}" cannot be used where the tenant comes from the request: ` +
+        `${source.kind === "header" ? "a caller can set any header" : "the signature is not verified"}. ` +
+        `Use kind "jwt-verified", which checks the token's signature, issuer and audience.`
+    );
+  }
+
   switch (source.kind) {
     case "static":
       return source.value;
@@ -57,6 +84,15 @@ export function resolveTenant(config: TenantConfig, options: TenantResolverOptio
       }
       return undefined;
     }
+    case "jwt-verified":
+      /*
+       * Verification is asynchronous -- it may fetch a key set -- and this
+       * function is synchronous and on the hot path for every other kind.
+       * `TenantVerifier` does it, and the caller hands the result in rather
+       * than this quietly returning undefined and looking like "not
+       * configured".
+       */
+      return options.verified;
     case "jwt-claim": {
       const raw = env[source.token_env];
       if (!raw) return undefined;
@@ -84,7 +120,9 @@ export function requireTenant(config: TenantConfig, options: TenantResolverOptio
         ? "static policy value"
         : config.source.kind === "jwt-claim"
           ? `claim "${config.source.name}" of the token in ${config.source.token_env}`
-          : `${config.source.kind} "${config.source.name}"`;
+          : config.source.kind === "jwt-verified"
+            ? `verified claim "${config.source.claim}" of the caller's token`
+            : `${config.source.kind} "${config.source.name}"`;
     throw new TenantError(
       `tenant scoping is required but ${config.field} could not be resolved from ${where}. ` +
         `Set it, or set tenant.required to false if this deployment is genuinely single-tenant.`

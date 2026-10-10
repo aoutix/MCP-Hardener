@@ -50,11 +50,46 @@ export const RuleSchema = z
   .strict();
 export type Rule = z.infer<typeof RuleSchema>;
 
-export const TenantSourceSchema = z.discriminatedUnion("kind", [
+/**
+ * A tenant read out of a signature-verified bearer token.
+ *
+ * The only source kind safe to use when the token arrives per request from
+ * the caller, which is the hosted-gateway case. The others take their value
+ * from the deployment -- an env var, a static string, a credential the
+ * operator placed -- and are trustworthy precisely because nothing the caller
+ * controls reaches them.
+ *
+ * Kept separate from `jwt-claim` rather than added to it as a flag. There is
+ * no setting here that turns verification off, and `jwt-claim` keeps meaning
+ * what it has always meant instead of quietly becoming unsafe.
+ */
+export const JwtVerifiedSourceSchema = z
+  .object({
+    kind: z.literal("jwt-verified"),
+    /** The claim carrying the tenant, e.g. "org_id". */
+    claim: z.string().min(1),
+    /** Where to fetch the signing keys. Dialled through the egress guard. */
+    jwks_uri: z.string().url().optional(),
+    /** A pinned PEM public key, for a deployment with no JWKS endpoint. */
+    public_key: z.string().min(1).optional(),
+    /** Both required: a token valid for somewhere else is not valid here. */
+    issuer: z.string().min(1),
+    audience: z.string().min(1),
+    /** Header carrying the token. */
+    header_name: z.string().min(1).default("authorization")
+  })
+  .strict()
+  .refine((v) => (v.jwks_uri === undefined) !== (v.public_key === undefined), {
+    message: "exactly one of tenant.source.jwks_uri or tenant.source.public_key is required"
+  });
+export type JwtVerifiedSource = z.infer<typeof JwtVerifiedSourceSchema>;
+
+export const TenantSourceSchema = z.union([
   z.object({ kind: z.literal("env"), name: z.string().min(1) }).strict(),
   z.object({ kind: z.literal("header"), name: z.string().min(1) }).strict(),
   z.object({ kind: z.literal("jwt-claim"), name: z.string().min(1), token_env: z.string().min(1) }).strict(),
-  z.object({ kind: z.literal("static"), value: z.string().min(1) }).strict()
+  z.object({ kind: z.literal("static"), value: z.string().min(1) }).strict(),
+  JwtVerifiedSourceSchema
 ]);
 export type TenantSource = z.infer<typeof TenantSourceSchema>;
 

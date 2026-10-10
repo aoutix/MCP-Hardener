@@ -1,6 +1,7 @@
 export * from "./canonical.js";
 export * from "./http-util.js";
 export * from "./migrate.js";
+export * from "./jwt.js";
 export * from "./glob.js";
 export * from "./policy.js";
 export * from "./redact.js";

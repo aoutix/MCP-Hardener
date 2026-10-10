@@ -13,6 +13,7 @@ import {
   exposureDeniedReason,
   parsePolicy,
   policyDigest,
+  TenantError,
   requireTenant,
   type ElicitFn,
   type ScopedApprovals,
@@ -105,6 +106,20 @@ export class HardenedServer {
 
     // Resolved once at startup so a missing tenant fails loudly here rather
     // than turning into an unscoped query later.
+    if (this.policy.tenant?.source.kind === "jwt-verified") {
+      /*
+       * A generated server speaks stdio to one client and holds one upstream
+       * credential: there is no inbound request to read a token from, so this
+       * source can never resolve here. Saying so is better than resolving to
+       * undefined and failing later as "tenant required but not configured",
+       * which points at the wrong thing.
+       */
+      throw new TenantError(
+        'tenant.source.kind "jwt-verified" resolves the tenant from an inbound request, which a generated ' +
+          "server does not have: it serves one client over stdio. Use env, static or jwt-claim here, or run " +
+          "hmcp-gateway with --http if you need a tenant per caller."
+      );
+    }
     this.tenantValue = this.policy.tenant ? requireTenant(this.policy.tenant) : undefined;
 
     this.egress = new EgressGuard(this.policy.egress);

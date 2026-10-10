@@ -1,7 +1,8 @@
 import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from "node:http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { randomUUID } from "node:crypto";
-import { HttpError } from "@hmcp/core";
+import { HttpError, TenantError, TenantVerifier, bearerToken } from "@hmcp/core";
+import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import type { Gateway } from "./gateway.js";
 
 /**
@@ -86,6 +87,30 @@ function hostName(raw: string | undefined): string | undefined {
 
 export async function serveHttp(gateway: Gateway, options: ServeHttpOptions): Promise<ServingHttp> {
   const host = options.host ?? "127.0.0.1";
+
+  /*
+   * Refuse to start rather than serve many tenants out of one scope.
+   *
+   * Over HTTP every stored row is filed under the tenant, so an unverified
+   * tenant means anyone can file under anyone. The dangerous outcome is not a
+   * crash, it is a server that comes up looking fine and quietly puts every
+   * customer in the same bucket -- or lets one name themselves as another.
+   * A policy with no tenant at all is allowed: that is a single-tenant
+   * deployment that happens to be reachable over a socket, and it says so.
+   */
+  const tenantConfig = gateway.tenantConfig;
+  if (tenantConfig && tenantConfig.source.kind !== "jwt-verified") {
+    throw new Error(
+      `this gateway is configured with tenant.source.kind "${tenantConfig.source.kind}", which resolves ` +
+        `one tenant for the whole process. Serving over HTTP means many callers share it, so the tenant ` +
+        `has to come from the request: use kind "jwt-verified". Remove the tenant block if this really is ` +
+        `a single-tenant deployment.`
+    );
+  }
+  const verifier =
+    tenantConfig?.source.kind === "jwt-verified"
+      ? new TenantVerifier(tenantConfig.source, gateway.egressGuard)
+      : undefined;
   const idleMs = options.sessionIdleMs ?? DEFAULT_IDLE_MS;
   const allowed = new Set(
     (options.allowedHosts ?? ["127.0.0.1", "localhost", "[::1]"]).map((h) => h.toLowerCase())
@@ -166,8 +191,46 @@ export async function serveHttp(gateway: Gateway, options: ServeHttpOptions): Pr
       return;
     }
 
+    /*
+     * Authenticate before anything stateful. The token is verified on every
+     * request rather than once per session: a session id is not a credential,
+     * and binding authorization to it would mean a token that has since
+     * expired or been revoked keeps working for as long as the client holds
+     * the session open.
+     */
+    let auth: AuthInfo | undefined;
+    if (verifier) {
+      const header = tenantConfig?.source.kind === "jwt-verified" ? tenantConfig.source.header_name : "authorization";
+      const token = bearerToken(req.headers, header);
+      if (!token) {
+        res.setHeader("WWW-Authenticate", 'Bearer realm="hmcp-gateway"');
+        send(res, 401, "unauthorized", `this gateway requires a bearer token in the ${header} header`);
+        return;
+      }
+      try {
+        const claim = await verifier.verify(token);
+        auth = {
+          token,
+          clientId: claim.subject ?? "unknown",
+          scopes: [],
+          extra: { tenant: claim.tenant }
+        };
+      } catch (err) {
+        if (err instanceof TenantError) {
+          send(res, 403, "forbidden", err.message);
+          return;
+        }
+        throw err;
+      }
+    }
+
     const id = req.headers["mcp-session-id"];
     const sessionId = Array.isArray(id) ? id[0] : id;
+
+    // The SDK reads the credential off the request object and surfaces it to
+    // handlers as `extra.authInfo`; this is its designated hook.
+    const authed = req as IncomingMessage & { auth?: AuthInfo };
+    if (auth) authed.auth = auth;
 
     try {
       if (sessionId) {
@@ -179,14 +242,14 @@ export async function serveHttp(gateway: Gateway, options: ServeHttpOptions): Pr
           return;
         }
         session.lastSeen = Date.now();
-        await session.transport.handleRequest(req, res);
+        await session.transport.handleRequest(authed, res);
         return;
       }
 
       // No session id: either an initialize, or a client that has lost its
       // session. The transport tells the two apart and answers accordingly.
       const session = await openSession();
-      await session.transport.handleRequest(req, res);
+      await session.transport.handleRequest(authed, res);
     } catch (err) {
       if (err instanceof HttpError) {
         send(res, err.status, err.code, err.message);

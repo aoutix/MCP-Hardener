@@ -146,6 +146,8 @@ export function describeTenantSource(policy: Policy): string {
       return `the ${tenant.source.name} request header`;
     case "jwt-claim":
       return `the ${tenant.source.name} claim of the token in ${tenant.source.token_env}`;
+    case "jwt-verified":
+      return `the verified ${tenant.source.claim} claim of the caller's token, issued by ${tenant.source.issuer}`;
     case "static":
       return "a fixed value in the policy";
   }
