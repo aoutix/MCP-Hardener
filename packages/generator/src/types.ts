@@ -83,6 +83,12 @@ export interface ManifestTool {
   method: string;
   path: string;
   summary: string;
+  /**
+   * This operation's position in the spec, counting every operation the
+   * document declares. The list below is written in name order, so this is
+   * the only record of the order the spec author chose.
+   */
+  spec_index?: number;
   /** Tenant parameters stripped from the agent-facing schema and injected server-side. */
   tenant_params?: string[];
   /** Parameters dropped from the tool entirely. */

@@ -179,7 +179,7 @@ export function curate(spec: ParsedSpec, options: CurateOptions = {}): CurateRes
   const tools: ManifestTool[] = [];
   const operationsByTool = new Map<string, Operation>();
 
-  for (const operation of spec.operations) {
+  for (const [specIndex, operation] of spec.operations.entries()) {
     const name = names.get(operation)!;
 
     if (operation.deprecated && !options.includeDeprecated) {
@@ -216,7 +216,9 @@ export function curate(spec: ParsedSpec, options: CurateOptions = {}): CurateRes
       operationId: operation.operationId,
       method: operation.method,
       path: operation.path,
-      summary: operation.summary || operation.description.split("\n")[0]?.slice(0, 120) || ""
+      summary: operation.summary || operation.description.split("\n")[0]?.slice(0, 120) || "",
+      // Recorded before the sort below reorders the list by name.
+      spec_index: specIndex
     };
     if (review) tool.review = review;
     if (tenantParams.length > 0) tool.tenant_params = tenantParams;
@@ -225,6 +227,8 @@ export function curate(spec: ParsedSpec, options: CurateOptions = {}): CurateRes
     operationsByTool.set(name, operation);
   }
 
+  // Name order, which keeps the manifest scannable and its diffs stable when a
+  // spec is reordered. `spec_index` above is what preserves the other order.
   tools.sort((a, b) => a.name.localeCompare(b.name));
 
   const manifest: Manifest = {

@@ -53,8 +53,20 @@ export function emit(options: EmitOptions): EmitResult {
   const caps = options.caps ?? DEFAULT_CAPS;
 
   const operationsById = new Map<string, Operation>();
-  for (const operation of spec.operations) {
-    operationsById.set(operationKey(operation.method, operation.path), operation);
+  /*
+   * Where each operation sits in the spec, so a manifest written before
+   * `spec_index` existed still produces a tool surface that can be shown in
+   * spec order. The manifest's own value wins where it has one — it was
+   * recorded against the spec that was current when the manifest was reviewed
+   * — and this is the fallback, derived from the spec being built against.
+   * Without it, "spec order" would only ever work for a surface that had been
+   * re-planned, not merely rebuilt.
+   */
+  const specIndexByOperation = new Map<string, number>();
+  for (const [index, operation] of spec.operations.entries()) {
+    const key = operationKey(operation.method, operation.path);
+    operationsById.set(key, operation);
+    specIndexByOperation.set(key, index);
   }
 
   const descriptors: ToolDescriptor[] = [];
@@ -69,7 +81,15 @@ export function emit(options: EmitOptions): EmitResult {
           `Re-run "hmcp-gen plan" against the current spec.`
       );
     }
-    const built = buildDescriptor({ operation, tool, tenant: policy.tenant, caps });
+    const built = buildDescriptor({
+      operation,
+      tool: {
+        ...tool,
+        spec_index: tool.spec_index ?? specIndexByOperation.get(operationKey(tool.method, tool.path))
+      },
+      tenant: policy.tenant,
+      caps
+    });
     descriptors.push(built.descriptor);
     for (const entry of built.omitted) {
       omitted.push({ tool: tool.name, param: entry.name, in: entry.in, reason: entry.reason });

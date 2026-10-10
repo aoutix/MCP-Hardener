@@ -337,7 +337,10 @@ export function buildDescriptor(options: BuildDescriptorOptions): BuildDescripto
     source: {
       ...(operation.operationId ? { operationId: operation.operationId } : {}),
       ...(operation.summary ? { summary: operation.summary } : {}),
-      ...(operation.deprecated ? { deprecated: operation.deprecated } : {})
+      ...(operation.deprecated ? { deprecated: operation.deprecated } : {}),
+      // Carried through from the manifest: the tool list is in name order, so
+      // without this the order the spec author chose is lost for good.
+      ...(tool.spec_index !== undefined ? { specIndex: tool.spec_index } : {})
     }
   };
 

@@ -118,7 +118,20 @@ export const ToolDescriptorSchema = z
       .object({
         operationId: z.string().optional(),
         summary: z.string().optional(),
-        deprecated: z.boolean().optional()
+        deprecated: z.boolean().optional(),
+        /**
+         * Where this operation sat in the spec, counting every operation the
+         * document declares rather than only the ones that became tools.
+         *
+         * The tool list is written in name order, which keeps a manifest
+         * readable and its diffs stable when a spec is reordered — but it also
+         * throws away the author's grouping, where the operations on one
+         * resource sit together. Carrying the index means a reader can get
+         * that grouping back without the generator having to choose between
+         * the two orders. Optional: a file written before this field existed
+         * still parses, and a surface that never came from a spec has none.
+         */
+        specIndex: z.number().int().nonnegative().optional()
       })
       .strict()
       .optional()
