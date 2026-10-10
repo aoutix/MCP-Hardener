@@ -20,16 +20,42 @@ import {
 /** What `useExposure` hands to the list and the detail pane. */
 type ExposureControl = ReturnType<typeof useExposure>;
 
-type ExposureKind = "exposed" | "review" | "internal" | "off";
+type VerdictKind = "allowed" | "review" | "refused" | "off";
 
 /**
- * What the model can actually do with this function, collapsed to the states
- * the list is grouped by. It is derived from the verdict the server's own
- * `decide()` produced, never from the policy file read a second time here —
- * except for `off`, which is the console's own switch and takes precedence
- * because the runtime refuses a switched-off tool before weighing anything.
+ * How the list can be ordered. `source` is the order the spec author wrote the
+ * operations in, and is only offered on a server whose tools carry a spec
+ * index — see `sorts` below.
  */
-function exposureOf(tool: ToolProtection): { kind: ExposureKind; label: string; title: string } {
+type SortKey = "source" | "risk" | "name";
+
+const SORT_LABEL: Record<SortKey, string> = {
+  source: "Spec order",
+  risk: "Most permissive",
+  name: "Name"
+};
+
+/**
+ * Two different facts live on this page, and the page used to confuse them.
+ *
+ * *Exposure* is whether the server advertises a function in `tools/list`, and
+ * the console's switch is the only thing in the system that changes it. This
+ * function answers the other question: what `decide()` does with a call once
+ * it arrives. The two are independent. A refused function is still advertised
+ * and still callable — the call dies at the policy check, which is the whole
+ * point of denying a tool rather than never generating it: the attempt leaves
+ * a record naming the rule that refused it.
+ *
+ * So nothing here is named "exposed". These are verdicts, and the switch is
+ * exposure; one word for each, because the old vocabulary let a policy-denied
+ * function read as "not exposed" while the server was advertising it.
+ *
+ * Derived from the verdict the server's own `decide()` produced, never from
+ * the policy file read a second time here — except for `off`, which is the
+ * console's own switch and takes precedence because the runtime refuses a
+ * switched-off tool before weighing anything.
+ */
+function verdictOf(tool: ToolProtection): { kind: VerdictKind; label: string; title: string } {
   if (tool.exposure.disabled) {
     const who = tool.exposure.setBy ? ` by ${tool.exposure.setBy}` : "";
     const why = tool.exposure.reason ? `: ${tool.exposure.reason}` : "";
@@ -45,15 +71,15 @@ function exposureOf(tool: ToolProtection): { kind: ExposureKind; label: string; 
   }
   if (tool.unreachable) {
     return {
-      kind: "internal",
+      kind: "refused",
       label: "Unreachable",
       title: "Approval is required for this function, but approvals are disabled in this policy."
     };
   }
   if (tool.review) return { kind: "review", label: "Needs review", title: tool.review };
-  if (tool.verdict.kind === "deny") return { kind: "internal", label: "Internal", title: tool.verdict.reason };
+  if (tool.verdict.kind === "deny") return { kind: "refused", label: "Refused", title: tool.verdict.reason };
   if (tool.verdict.kind === "approve") return { kind: "review", label: "Needs approval", title: tool.verdict.reason };
-  return { kind: "exposed", label: "Exposed", title: tool.verdict.reason };
+  return { kind: "allowed", label: "Allowed", title: tool.verdict.reason };
 }
 
 const PERMISSION: Record<string, { label: string; className: string }> = {
@@ -80,8 +106,8 @@ export function Functions({ serverId, onServerChanged }: { serverId: string; onS
   const { data, error, loading, reload } = useResource(() => api.protection(serverId), [serverId]);
   const [query, setQuery] = useState("");
   const [effect, setEffect] = useState("all");
-  const [filter, setFilter] = useState<"all" | ExposureKind>("all");
-  const [sort, setSort] = useState<"source" | "risk" | "name">("source");
+  const [filter, setFilter] = useState<"all" | VerdictKind>("all");
+  const [sort, setSort] = useState<SortKey>("source");
   const [selected, setSelected] = useState<string | null>(null);
   const [detailOpen, setDetailOpen] = useState(true);
   /**
@@ -103,6 +129,30 @@ export function Functions({ serverId, onServerChanged }: { serverId: string; onS
 
   const all = useMemo(() => data?.tools ?? [], [data]);
 
+  /*
+   * Which sorts this particular server can actually honour.
+   *
+   * Name and permission are properties of any tool surface, so they are always
+   * offered. Spec order is not: it needs `source.specIndex`, which only a
+   * server generated after that field existed carries. Offering it regardless
+   * meant the button said "Spec order" and quietly showed name order, which is
+   * the same false claim the exposure switch used to make — so the option is
+   * withdrawn rather than left to mislead, exactly as a switch that cannot
+   * change anything is.
+   *
+   * Computed per server, because the console switches between them and a sort
+   * that was available a moment ago may not be.
+   */
+  const sorts = useMemo(() => {
+    const available: SortKey[] = ["risk", "name"];
+    if (all.some((t) => t.source?.specIndex !== undefined)) available.unshift("source");
+    return available;
+  }, [all]);
+
+  /* A sort held over from a server that supported it falls back to the first
+     this one does, rather than rendering a label it cannot act on. */
+  const activeSort = sorts.includes(sort) ? sort : sorts[0]!;
+
   useEffect(() => {
     setHeld([]);
   }, [filter]);
@@ -110,15 +160,43 @@ export function Functions({ serverId, onServerChanged }: { serverId: string; onS
   const tools = useMemo(() => {
     const rank = { destructive: 0, write: 1, read: 2 } as Record<string, number>;
     const filtered = all.filter((t) => {
-      if (filter !== "all" && exposureOf(t).kind !== filter && !held.includes(t.name)) return false;
+      if (filter !== "all" && verdictOf(t).kind !== filter && !held.includes(t.name)) return false;
       if (effect !== "all" && t.effect !== effect) return false;
       if (!query) return true;
       return `${t.name} ${t.description} ${t.method} ${t.path}`.toLowerCase().includes(query.toLowerCase());
     });
-    if (sort === "name") return [...filtered].sort((a, b) => a.name.localeCompare(b.name));
-    if (sort === "risk") return [...filtered].sort((a, b) => (rank[a.effect] ?? 3) - (rank[b.effect] ?? 3));
-    return filtered;
-  }, [all, query, effect, filter, sort, held]);
+    if (activeSort === "name") return [...filtered].sort((a, b) => a.name.localeCompare(b.name));
+    if (activeSort === "risk") {
+      // Effect first, then name, so the order within a band is stable and does
+      // not quietly depend on what the server happened to send.
+      return [...filtered].sort(
+        (a, b) => (rank[a.effect] ?? 3) - (rank[b.effect] ?? 3) || a.name.localeCompare(b.name)
+      );
+    }
+    /*
+     * Spec order: the order the spec author wrote the operations in, which
+     * groups the ones on a single resource together in a way neither of the
+     * other two sorts does.
+     *
+     * It has to be reconstructed from `source.specIndex`, because the tool list
+     * arrives in name order — the generator writes it that way so a manifest
+     * stays readable and its diffs stay stable. Without the index this sort
+     * silently produced the same list as "Name", which is how it came to look
+     * broken: two of the three options were one option.
+     *
+     * A tool carrying no index — generated before the field existed, or from a
+     * gateway rather than a spec — sorts after the ones that do, in name order,
+     * rather than being scattered through them by a default of 0.
+     */
+    return [...filtered].sort((a, b) => {
+      const ai = a.source?.specIndex;
+      const bi = b.source?.specIndex;
+      if (ai !== undefined && bi !== undefined) return ai - bi;
+      if (ai !== undefined) return -1;
+      if (bi !== undefined) return 1;
+      return a.name.localeCompare(b.name);
+    });
+  }, [all, query, effect, filter, activeSort, held]);
 
   useEffect(() => {
     if (tools.length > 0 && !tools.some((t) => t.name === selected)) setSelected(tools[0]!.name);
@@ -134,8 +212,8 @@ export function Functions({ serverId, onServerChanged }: { serverId: string; onS
   }
   if (loading && !data) return <Empty>Loading functions…</Empty>;
 
-  const counts = { exposed: 0, review: 0, internal: 0, off: 0 };
-  for (const t of all) counts[exposureOf(t).kind]++;
+  const counts = { allowed: 0, review: 0, refused: 0, off: 0 };
+  for (const t of all) counts[verdictOf(t).kind]++;
 
   const active = tools.find((t) => t.name === selected) ?? null;
 
@@ -183,7 +261,7 @@ export function Functions({ serverId, onServerChanged }: { serverId: string; onS
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder="Search functions, descriptions or paths…"
-                className="w-full rounded-xl border border-edge bg-white/55 py-2.5 pr-3 pl-9 text-sm placeholder:text-ink-faint focus:border-accent/60 focus:ring-2 focus:ring-accent/15 focus:outline-none"
+                className="w-full rounded-xl border border-edge bg-raise py-2.5 pr-3 pl-9 text-sm placeholder:text-ink-faint focus:border-accent/60 focus:ring-2 focus:ring-accent/15 focus:outline-none"
               />
             </div>
             <Select value={effect} onChange={setEffect}>
@@ -197,8 +275,8 @@ export function Functions({ serverId, onServerChanged }: { serverId: string; onS
           <div className="flex flex-wrap items-center justify-between gap-2 px-7 pt-4">
             <div className="flex flex-wrap items-center gap-1">
               <FilterTab id="all" active={filter} onPick={setFilter} label="All functions" count={all.length} />
-              <FilterTab id="exposed" active={filter} onPick={setFilter} label="Exposed" count={counts.exposed} />
-              <FilterTab id="internal" active={filter} onPick={setFilter} label="Internal" count={counts.internal} />
+              <FilterTab id="allowed" active={filter} onPick={setFilter} label="Allowed" count={counts.allowed} />
+              <FilterTab id="refused" active={filter} onPick={setFilter} label="Refused" count={counts.refused} />
               <FilterTab
                 id="review"
                 active={filter}
@@ -215,15 +293,15 @@ export function Functions({ serverId, onServerChanged }: { serverId: string; onS
               )}
             </div>
             <button
-              onClick={() => setSort(sort === "source" ? "risk" : sort === "risk" ? "name" : "source")}
-              className="flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[0.8125rem] text-ink-soft transition hover:bg-white/50 hover:text-ink"
+              onClick={() => setSort(sorts[(sorts.indexOf(activeSort) + 1) % sorts.length]!)}
+              className="flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[0.8125rem] text-ink-soft transition hover:bg-raise hover:text-ink"
             >
               <Icon name="sort" size={15} />
-              {sort === "source" ? "Spec order" : sort === "risk" ? "Most permissive" : "Name"}
+              {SORT_LABEL[activeSort]}
             </button>
           </div>
 
-          <div className="mt-3 grid grid-cols-[minmax(0,1fr)_170px_110px_132px] gap-3 border-y border-edge bg-white/35 px-7 py-2 text-[0.6875rem] font-medium tracking-[0.06em] text-ink-faint uppercase">
+          <div className="mt-3 grid grid-cols-[minmax(0,1fr)_170px_110px_132px] gap-3 border-y border-edge bg-raise-soft px-7 py-2 text-[0.6875rem] font-medium tracking-[0.06em] text-ink-faint uppercase">
             <span>Function</span>
             <span>Authentication</span>
             <span>Permissions</span>
@@ -247,7 +325,7 @@ export function Functions({ serverId, onServerChanged }: { serverId: string; onS
                   onToggle={exposure.onToggle(tool)}
                   busy={exposure.busy(tool)}
                   flash={exposure.flash(tool)}
-                  held={filter !== "all" && exposureOf(tool).kind !== filter}
+                  held={filter !== "all" && verdictOf(tool).kind !== filter}
                 />
               ))
             )}
@@ -256,10 +334,10 @@ export function Functions({ serverId, onServerChanged }: { serverId: string; onS
           <div className="flex items-center gap-2 border-t border-edge px-7 py-3 text-[0.8125rem] text-ink-soft">
             <Icon name="shield" size={15} className="text-accent" />
             <span>
-              <span className="text-ink">{counts.exposed} functions</span> are reachable by the model.
+              <span className="text-ink">{counts.allowed} functions</span> are reachable by the model.
             </span>
             <span className="text-ink-faint">
-              {counts.review} held for review or approval, {counts.internal} can never run
+              {counts.review} held for review or approval, {counts.refused} can never run
               {counts.off > 0 ? `, ${counts.off} switched off here` : ""}.
             </span>
           </div>
@@ -285,7 +363,7 @@ export function Functions({ serverId, onServerChanged }: { serverId: string; onS
             <button
               onClick={() => setDetailOpen(true)}
               title="Show function details"
-              className="rounded-lg p-1.5 text-ink-faint transition hover:bg-white/50 hover:text-ink"
+              className="rounded-lg p-1.5 text-ink-faint transition hover:bg-raise hover:text-ink"
             >
               <Icon name="expand" size={17} />
             </button>
@@ -494,7 +572,7 @@ function Select({
       <select
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        className="appearance-none rounded-xl border border-edge bg-white/55 py-2.5 pr-8 pl-3 text-sm font-medium focus:border-accent/60 focus:outline-none"
+        className="appearance-none rounded-xl border border-edge bg-raise py-2.5 pr-8 pl-3 text-sm font-medium focus:border-accent/60 focus:outline-none"
       >
         {children}
       </select>
@@ -511,9 +589,9 @@ function FilterTab({
   count,
   tone
 }: {
-  id: "all" | ExposureKind;
+  id: "all" | VerdictKind;
   active: string;
-  onPick: (v: "all" | ExposureKind) => void;
+  onPick: (v: "all" | VerdictKind) => void;
   label: string;
   count: number;
   tone?: string;
@@ -523,7 +601,7 @@ function FilterTab({
     <button
       onClick={() => onPick(id)}
       className={`rounded-lg px-3 py-1.5 text-[0.8125rem] font-medium transition ${
-        on ? "bg-white/60 text-ink" : "text-ink-soft hover:text-ink"
+        on ? "bg-raise-strong text-ink" : "text-ink-soft hover:text-ink"
       }`}
     >
       {label} <span className={`ml-1 ${tone ?? "text-ink-faint"}`}>{count}</span>
@@ -532,16 +610,26 @@ function FilterTab({
 }
 
 /**
- * The exposure switch.
+ * The exposure switch: is this function advertised in `tools/list`?
  *
- * Off means off: the tool is not advertised and every call to it is refused.
- * On does *not* mean allowed — it means "policy decides", so a function policy
- * refuses still reads as Internal with the switch left where policy puts it.
- * That asymmetry is the point, and it is why this console can own this one
- * control without becoming a second, unreviewed policy file.
+ * That is the whole of what it reports, and it is the only question the
+ * console is able to answer by changing something. It deliberately says
+ * nothing about whether a call would succeed — the verdict beside it does
+ * that, and the two are independent.
  *
- * Without `onToggle` it renders as the indicator it has always been, which is
- * what a gateway gets: its surface belongs to its upstreams.
+ * It used to be wired as `!disabled && policyWouldExpose`, which mixed the two
+ * together: a policy-denied function showed as not exposed while the server
+ * was advertising it quite happily, and the switch went inert, so the page
+ * made a false claim and then refused to let anyone act on it.
+ *
+ * Off means off: the tool is withdrawn from `tools/list` and every call to it
+ * is refused before any rule is weighed. On does *not* mean allowed — it means
+ * the override is cleared and policy decides, which for a denied function
+ * still means refused. That asymmetry is the point, and it is why this console
+ * can own this one control without becoming a second, unreviewed policy file.
+ *
+ * Without `onToggle` it renders as a read-only indicator, which is what a
+ * gateway gets: its surface belongs to its upstreams.
  */
 function ExposureSwitch({
   tool,
@@ -558,39 +646,53 @@ function ExposureSwitch({
   bloom?: boolean;
 }) {
   const { disabled, policyWouldExpose } = tool.exposure;
-  const on = !disabled && policyWouldExpose;
   /**
-   * A function policy already refuses has nothing to switch: the override can
-   * only subtract, and there is nothing left to subtract. Offering a control
-   * that cannot change the outcome would be the one dishonest thing this page
-   * could do.
+   * Policy refuses this function outright, and that is not this console's
+   * decision to revisit. The control stops being a switch here and becomes a
+   * marker: locked, toned like a refusal rather than like an off switch, and
+   * carrying the rule id so the reader knows which line of `policy.yaml` to
+   * go and change. A switch that moves would imply the console could grant
+   * something policy denies, and it cannot.
    */
-  const actionable = onToggle !== undefined && (disabled || policyWouldExpose);
+  const policyRefuses = !disabled && !policyWouldExpose;
+  const on = !disabled && !policyRefuses;
+  const actionable = onToggle !== undefined && !policyRefuses;
 
   const body = (
     <span
       className={`switch-track inline-flex h-[18px] w-8 shrink-0 items-center justify-start rounded-full px-0.5 ${
         on ? "switch-on" : ""
-      } ${busy ? "bg-ink-faint" : on ? "bg-accent-strong" : "bg-edge"} ${
+      } ${busy ? "bg-ink-faint" : on ? "bg-switch-on" : policyRefuses ? "bg-deny/55" : "bg-edge"} ${
         // Only once the write has landed: blooming on the click and again on
         // the reload would read as two separate changes.
         bloom === undefined || busy ? "" : bloom ? "switch-bloom-on" : "switch-bloom-off"
       }`}
     >
+      {/* Literally white in both themes, and the one fill in the console that
+          is: it is a knob on a coloured track, so it has to stay lighter than
+          all three track states rather than follow the palette. */}
       <span className={`switch-knob h-3.5 w-3.5 rounded-full bg-white shadow-xs ${busy ? "animate-pulse" : ""}`} />
     </span>
   );
 
+  // Two things land here: a function policy refuses, and a surface this
+  // console does not own (a gateway's). Neither is switchable, and only the
+  // first has somewhere to send the reader.
   if (!actionable) {
     return (
       <span
         role="img"
-        aria-label={`${on ? "Exposed" : "Not exposed"}${
-          onToggle ? " — policy already refuses this function, so there is nothing to switch off" : ""
-        }`}
+        aria-label={
+          policyRefuses
+            ? `Refused by policy rule ${tool.verdict.ruleId}. Change it in policy.yaml; it cannot be changed here.`
+            : on
+              ? "Advertised to the model"
+              : "Withdrawn from the model's tool list"
+        }
         title={
-          onToggle
-            ? `${title}\n\nPolicy already refuses this function, so there is nothing to switch off.`
+          policyRefuses
+            ? `${title}\n\nRefused by policy.yaml, rule "${tool.verdict.ruleId}". ` +
+              `This cannot be changed from the console — edit policy.yaml and restart the server.`
             : title
         }
       >
@@ -604,9 +706,14 @@ function ExposureSwitch({
       type="button"
       role="switch"
       aria-checked={on}
-      aria-label={`Expose ${tool.name} to the model`}
+      aria-label={`Advertise ${tool.name} in the model's tool list`}
       disabled={busy}
-      title={`${title}\n\nClick to switch ${disabled ? "on" : "off"}.`}
+      title={
+        `${title}\n\n` +
+        (disabled
+          ? "Click to advertise it again. Policy decides from there, which may still refuse it."
+          : "Click to withdraw it from the model's tool list.")
+      }
       onClick={(e) => {
         // The row behind this is itself clickable; a toggle must not also
         // change which function the detail pane is showing.
@@ -640,7 +747,7 @@ function FunctionRow({
   /** Shown only because it was switched here; it no longer matches the tab. */
   held?: boolean;
 }) {
-  const exposure = exposureOf(tool);
+  const exposure = verdictOf(tool);
   const permission = PERMISSION[tool.effect] ?? { label: tool.effect, className: "text-ink" };
   const warn = exposure.kind === "review";
   const off = exposure.kind === "off";
@@ -728,7 +835,7 @@ function FunctionDetail({
   // The list is reloaded after a toggle, so `fallback` carries the fresher
   // exposure state; this pane's own fetch is not repeated on every change.
   const tool = data ? { ...data, exposure: fallback.exposure } : fallback;
-  const exposure = exposureOf(tool);
+  const exposure = verdictOf(tool);
   const [tab, setTab] = useState<"configuration" | "schema" | "activity">("configuration");
 
   return (
@@ -738,7 +845,7 @@ function FunctionDetail({
         <button
           onClick={onCollapse}
           title="Hide function details"
-          className="rounded-md p-1 text-ink-faint transition hover:bg-white/50 hover:text-ink"
+          className="rounded-md p-1 text-ink-faint transition hover:bg-raise hover:text-ink"
         >
           <Icon name="collapse" size={16} />
         </button>
@@ -749,7 +856,7 @@ function FunctionDetail({
           <h2 className="mono text-[1.0625rem] font-semibold">{tool.name}</h2>
           <span
             className={`shrink-0 rounded-md px-2 py-0.5 text-xs font-medium ${
-              exposure.kind === "exposed"
+              exposure.kind === "allowed"
                 ? "bg-accent-soft text-accent-strong"
                 : exposure.kind === "review"
                   ? "bg-write/10 text-write"
@@ -837,10 +944,17 @@ function Section({
   );
 }
 
-function Row({ label, children }: { label: string; children: React.ReactNode }) {
+function Row({ label, tag, children }: { label: string; tag?: string; children: React.ReactNode }) {
   return (
     <div className="flex items-baseline justify-between gap-3 text-[0.8125rem]">
-      <dt className="shrink-0 text-ink-soft">{label}</dt>
+      <dt className="flex shrink-0 items-baseline gap-1.5 text-ink-soft">
+        {label}
+        {tag && (
+          <span className="rounded bg-subtle px-1 py-px text-[0.625rem] font-medium tracking-wide text-ink-faint uppercase">
+            {tag}
+          </span>
+        )}
+      </dt>
       <dd className="min-w-0 truncate text-right font-medium">{children}</dd>
     </div>
   );
@@ -855,12 +969,28 @@ function ConfigurationTab({
   server: ServerProtection | null;
   exposure: ExposureControl;
 }) {
-  const exposure = exposureOf(tool);
+  const exposure = verdictOf(tool);
   const permission = PERMISSION[tool.effect] ?? { label: tool.effect, className: "text-ink" };
   const audit = server?.audit;
 
   return (
     <div className="space-y-5">
+      {/*
+       * First, because it qualifies every number below it rather than
+       * describing one of them. The console re-reads policy.yaml on each
+       * request; a running server parsed it once at startup. When those two
+       * have drifted, this pane is describing a file and not what is in force,
+       * and that is the one case where its figures can be confidently wrong.
+       */}
+      {server?.runtime.policyApplied === false && (
+        <Banner tone="warn">
+          <strong>Not what the running server is enforcing.</strong> It started{" "}
+          {server.runtime.startedAt ? relativeTime(server.runtime.startedAt) : "earlier"} and is still applying the{" "}
+          <Mono>policy.yaml</Mono> it parsed then. The file has changed since, so the verdict, rule and safeguards
+          below describe the file rather than what any call is actually being held to.
+          <span className="mt-1.5 block text-ink-soft">Restart the server to apply it.</span>
+        </Banner>
+      )}
       {tool.review && (
         <Banner tone="warn">
           <strong>The generator could not classify this safely.</strong> {tool.review}
@@ -869,6 +999,21 @@ function ConfigurationTab({
       {tool.unreachable && !tool.exposure.disabled && (
         <Banner tone="warn">
           Advertised to the model but it can never run: it needs approval, and approvals are disabled.
+        </Banner>
+      )}
+      {/* The one state a reader is most likely to try to fix from here, and
+          the one they cannot: say where the decision actually lives. */}
+      {tool.verdict.kind === "deny" && !tool.exposure.disabled && (
+        <Banner tone="bad">
+          <strong>Refused by policy.</strong> Rule <Mono>{tool.verdict.ruleId}</Mono> in <Mono>policy.yaml</Mono>{" "}
+          denies every call to this function
+          {tool.verdict.reason ? ` — ${tool.verdict.reason}` : ""}. This console cannot change that: granting a
+          permission policy does not already grant is an edit to <Mono>policy.yaml</Mono>, reviewed in git, and the
+          server is restarted to pick it up.
+          <span className="mt-1.5 block text-ink-soft">
+            It is still advertised to the model, so an attempt to call it is refused and recorded in the audit log
+            rather than passing unnoticed.
+          </span>
         </Banner>
       )}
       {tool.exposure.disabled && (
@@ -884,7 +1029,7 @@ function ConfigurationTab({
       <section>
         <div className="flex items-center gap-2">
           <Icon name="plug" size={15} className="text-ink-soft" />
-          <span className="text-[0.8125rem] font-semibold">Exposed as MCP tool</span>
+          <span className="text-[0.8125rem] font-semibold">Advertised in the model's tool list</span>
           <span className="ml-auto">
             <ExposureSwitch
               tool={tool}
@@ -895,11 +1040,24 @@ function ConfigurationTab({
             />
           </span>
         </div>
+        {/* Said once, here, because the switch and the verdict above it are
+            the two facts most easily mistaken for each other. */}
+        <p className="mt-1.5 text-xs text-ink-soft">
+          Whether the model is told this function exists. Separate from whether a call would succeed —{" "}
+          {tool.verdict.kind === "deny" ? (
+            <>
+              and locked here, because <Mono>{tool.verdict.ruleId}</Mono> in <Mono>policy.yaml</Mono> refuses every
+              call either way.
+            </>
+          ) : (
+            "that is the verdict above."
+          )}
+        </p>
         <label className="mt-3 block text-xs text-ink-soft">Tool name</label>
         <input
           readOnly
           value={tool.name}
-          className="mono mt-1 w-full rounded-lg border border-edge bg-white/50 px-3 py-2 text-[0.8125rem]"
+          className="mono mt-1 w-full rounded-lg border border-edge bg-raise px-3 py-2 text-[0.8125rem]"
         />
       </section>
 
@@ -958,7 +1116,7 @@ function ConfigurationTab({
           </span>
         }
       >
-        <div className="rounded-lg border border-edge bg-white/45 px-3 py-2.5">
+        <div className="rounded-lg border border-edge bg-raise px-3 py-2.5">
           {tool.args.length === 0 ? (
             <p className="mono text-xs text-ink-soft">no arguments</p>
           ) : (
@@ -986,7 +1144,14 @@ function ConfigurationTab({
         </p>
       </Section>
 
-      <Section icon="timer" title="Runtime safeguards">
+      {/*
+       * Three of these four are `policy.egress` / `policy.audit` values and are
+       * identical on every function this server exposes; only the pagination
+       * cap is per-tool. Unmarked under a "Function details" heading they read
+       * as facts about this one function, so the odd one out is tagged and the
+       * caption says which file the rest come from.
+       */}
+      <Section icon="timer" title="Runtime safeguards" aside={<Tag>server-wide</Tag>}>
         <dl className="space-y-2">
           <Row label="Upstream timeout">
             {server ? <span className="mono">{server.egress.timeoutMs.toLocaleString()} ms</span> : "—"}
@@ -994,7 +1159,7 @@ function ConfigurationTab({
           <Row label="Response cap">
             {server ? <span className="mono">{bytes(server.egress.maxBodyBytes)}</span> : "—"}
           </Row>
-          <Row label="Pagination cap">
+          <Row label="Pagination cap" tag="this function">
             {tool.paginationCap ? (
               <span className="mono">
                 {tool.paginationCap.param} ≤ {tool.paginationCap.max}
@@ -1013,6 +1178,15 @@ function ConfigurationTab({
             )}
           </Row>
         </dl>
+        <p className="mt-2 text-xs text-ink-soft">
+          The timeout, response cap and audit settings are set once in <Mono>policy.yaml</Mono> and apply to every
+          function on this server. Only the pagination cap is per function.
+          {/* Said plainly rather than left to be assumed: with nothing running
+              these are what the next start would load, not what is in force. */}
+          {server && !server.runtime.running && (
+            <> No running server has announced itself, so these are the values one would load when it next starts.</>
+          )}
+        </p>
       </Section>
 
       {tool.withheldParams.length > 0 && (
