@@ -6,6 +6,7 @@ import { PolicyError, TenantError } from "@hmcp/core";
 import { toSarif, toText } from "@hmcp/scanner";
 import { loadGatewayConfig } from "./config.js";
 import { Gateway } from "./gateway.js";
+import { serveHttp } from "./serve-http.js";
 
 const program = new Command();
 
@@ -16,21 +17,60 @@ program
 
 program
   .command("serve", { isDefault: true })
-  .description("Run the gateway over stdio.")
+  .description("Run the gateway over stdio, or over HTTP with --http.")
   .option("-c, --config <file>", "gateway config", "gateway.yaml")
+  .option("--http [port]", "serve over Streamable HTTP on this port instead of stdio")
+  .option("--host <address>", "interface to bind when serving over HTTP", "127.0.0.1")
+  .option(
+    "--allow-host <name>",
+    "a Host header this gateway will answer to; repeatable",
+    (value: string, previous: string[]) => [...previous, value],
+    [] as string[]
+  )
   .action(async (options) => {
     await run(async () => {
       const { config, policy } = loadGatewayConfig(options.config as string);
       const gateway = new Gateway({ config, policy });
 
+      let serving: Awaited<ReturnType<typeof serveHttp>> | undefined;
       const shutdown = async () => {
+        if (serving) await serving.close();
         await gateway.close();
         process.exit(0);
       };
       process.on("SIGINT", shutdown);
       process.on("SIGTERM", shutdown);
 
-      await gateway.start();
+      if (options.http !== undefined) {
+        /*
+         * One process, many clients. Everything the gateway enforces is the
+         * same -- these are the handlers the stdio path installs -- but the
+         * posture around it is not: stdio is reachable only by whoever
+         * spawned it, while this is a socket. It binds to loopback unless
+         * told otherwise, and answers only to the host names it was given.
+         */
+        const port = options.http === true ? 7878 : Number(options.http);
+        if (!Number.isInteger(port) || port < 0 || port > 65535) {
+          throw new Error(`--http needs a port number, not ${JSON.stringify(options.http)}`);
+        }
+        await gateway.connectUpstreams();
+        const allowHosts = options.allowHost as string[];
+        serving = await serveHttp(gateway, {
+          port,
+          host: options.host as string,
+          ...(allowHosts.length > 0 ? { allowedHosts: allowHosts } : {})
+        });
+        warn(`[hmcp-gateway] listening on http://${options.host}:${serving.port}/mcp`);
+        if (options.host !== "127.0.0.1" && allowHosts.length === 0) {
+          warn(
+            `[hmcp-gateway] bound to ${options.host} but no --allow-host was given, so only ` +
+              `requests addressed to localhost will be answered. Pass --allow-host <name> for the ` +
+              `name clients will actually use.`
+          );
+        }
+      } else {
+        await gateway.start();
+      }
 
       // stdio carries the protocol, so the startup summary goes to stderr.
       const inventory = gateway.inventory();

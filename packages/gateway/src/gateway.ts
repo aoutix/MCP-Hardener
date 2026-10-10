@@ -46,6 +46,26 @@ export interface GatewayOptions {
  * is untrusted input: it is scanned for injection before being advertised, and
  * an upstream tool with no classification is not reachable at all.
  */
+/**
+ * What one call knows about who is making it.
+ *
+ * Over stdio there is one client for the life of the process and this is
+ * constant. Over HTTP there is one per MCP session, and a hosted gateway
+ * resolves the tenant per request — so everything that was read off the
+ * instance is passed in instead, and the two transports share one code path
+ * rather than growing a second.
+ */
+export interface CallContext {
+  /** Whose rows in the approvals database this call reads and writes. */
+  readonly scope: Scope;
+  /** The tenant as policy sees it; `undefined` when none is configured. */
+  readonly tenantValue: string | undefined;
+  /** Audit `session`: one MCP session, not one process. */
+  readonly session: string;
+  /** The `Server` this call arrived on, for elicitation back to that client. */
+  readonly server: Server;
+}
+
 export class Gateway {
   readonly server: Server;
   private readonly config: GatewayConfig;
@@ -57,6 +77,8 @@ export class Gateway {
   private readonly connections: UpstreamConnection[] = [];
   private readonly tools = new Map<string, GatewayTool>();
   private tenantValue: string | undefined;
+  /** Shared by every per-session `Server` this gateway mints. */
+  private readonly instructions: string;
   /** The audit `component`, which is also half of every storage scope. */
   private readonly component: string;
 
@@ -74,16 +96,15 @@ export class Gateway {
     this.approvalStore = new ApprovalStore(options.policy.approvals.store_path, options.cwd);
     this.tenantValue = options.policy.tenant ? requireTenant(options.policy.tenant) : undefined;
 
+    this.instructions =
+      `Policy gateway in front of ${options.config.upstreams.length} MCP server(s). ` +
+      `Posture: ${options.policy.defaults.mode}. Tools that mutate state may require human approval, ` +
+      `and a refusal names the policy rule that produced it. Tool descriptions from upstream servers are ` +
+      `treated as untrusted text and may have been rewritten.`;
+
     this.server = new Server(
       { name: options.config.name, version: "0.1.0" },
-      {
-        capabilities: { tools: { listChanged: true } },
-        instructions:
-          `Policy gateway in front of ${options.config.upstreams.length} MCP server(s). ` +
-          `Posture: ${options.policy.defaults.mode}. Tools that mutate state may require human approval, ` +
-          `and a refusal names the policy rule that produced it. Tool descriptions from upstream servers are ` +
-          `treated as untrusted text and may have been rewritten.`
-      }
+      { capabilities: { tools: { listChanged: true } }, instructions: this.instructions }
     );
   }
 
@@ -106,14 +127,43 @@ export class Gateway {
    */
   async start(transport?: Parameters<Server["connect"]>[0]): Promise<void> {
     await this.connectUpstreams();
-    this.installHandlers();
+    this.installHandlers(this.server, this.session);
     await this.server.connect(transport ?? new StdioServerTransport());
   }
 
   /** Installs the handlers without connecting, for an already-connected upstream set. */
   serveOn(transport: Parameters<Server["connect"]>[0]): Promise<void> {
-    this.installHandlers();
+    this.installHandlers(this.server, this.session);
     return this.server.connect(transport);
+  }
+
+  /**
+   * A `Server` for one MCP session, sharing this gateway's upstreams, policy,
+   * audit log and approvals store.
+   *
+   * An HTTP transport needs one of these per session rather than one per
+   * process: a `Server` connects to exactly one transport, and a stateful
+   * Streamable HTTP transport has exactly one session id, so sharing a single
+   * instance across clients is not a trade-off but a mistake. Everything
+   * expensive — the upstream connections, the tool map, the database handle —
+   * stays on the gateway and is shared; only the protocol object is per
+   * session.
+   *
+   * It also fixes something that was wrong even over stdio: `session` on an
+   * audit record is supposed to identify one conversation, and a single
+   * process-wide id made every call look like the same one.
+   */
+  newSessionServer(): { server: Server; session: string } {
+    const server = new Server(
+      { name: this.config.name, version: "0.1.0" },
+      {
+        capabilities: { tools: { listChanged: true } },
+        instructions: this.instructions
+      }
+    );
+    const session = randomUUID();
+    this.installHandlers(server, session);
+    return { server, session };
   }
 
   /**
@@ -122,8 +172,9 @@ export class Gateway {
    * verbatim. Converting it would mean either losing constraints or widening
    * what is accepted, and a gateway must not quietly do either.
    */
-  private installHandlers(): void {
-    this.server.setRequestHandler(ListToolsRequestSchema, async () => {
+  private installHandlers(server: Server, session: string): void {
+    server.setRequestHandler(ListToolsRequestSchema, async (_request, extra) => {
+      const ctx = this.contextFor(server, session, extra);
       /*
        * Read once per listing rather than once per tool: this is a query
        * against a file the console may be writing to, and a list is not worth
@@ -132,7 +183,7 @@ export class Gateway {
        * list happens to say, which covers the window between a toggle and the
        * next listing.
        */
-      const switchedOff = this.disabledTools(this.scopeFor(this.tenantValue));
+      const switchedOff = this.disabledTools(ctx.scope);
       return {
       tools: [...this.tools.values()]
         .filter((entry) => !entry.hidden && !switchedOff.has(entry.localName))
@@ -149,7 +200,8 @@ export class Gateway {
       };
     });
 
-    this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+      const ctx = this.contextFor(server, session, extra);
       const entry = this.tools.get(request.params.name);
 
       // An unknown or hidden tool is refused identically, so probing cannot
@@ -168,7 +220,7 @@ export class Gateway {
         };
       }
 
-      return this.dispatch(entry, (request.params.arguments ?? {}) as Record<string, unknown>);
+      return this.dispatch(entry, (request.params.arguments ?? {}) as Record<string, unknown>, ctx);
     });
   }
 
@@ -225,11 +277,15 @@ export class Gateway {
     };
   }
 
-  private elicitFn(): ElicitFn | undefined {
-    const capabilities = this.server.getClientCapabilities();
+  private elicitFn(server: Server): ElicitFn | undefined {
+    // Asked of the client this call arrived on, not of "the" client: with an
+    // HTTP transport there are several, and elicitation has to go back to the
+    // one that is waiting. Per-session `Server` instances are what keep this
+    // correct rather than forcing elicitation to be disabled over HTTP.
+    const capabilities = server.getClientCapabilities();
     if (!capabilities?.elicitation) return undefined;
     return async (request) =>
-      this.server.elicitInput({
+      server.elicitInput({
         mode: "form",
         message: request.message,
         requestedSchema: request.requestedSchema as never
@@ -278,11 +334,28 @@ export class Gateway {
     }
   }
 
-  private broker(scope: Scope): ApprovalBroker {
+  /**
+   * Who is calling, for one request.
+   *
+   * `extra` is the SDK's per-request envelope. Stage 2a reads nothing from it
+   * yet — the tenant still comes from policy, resolved once at construction —
+   * but the plumbing is here so that resolving it per request later is a
+   * change to this one method rather than to every call path.
+   */
+  private contextFor(server: Server, session: string, _extra: unknown): CallContext {
+    return {
+      scope: this.scopeFor(this.tenantValue),
+      tenantValue: this.tenantValue,
+      session,
+      server
+    };
+  }
+
+  private broker(ctx: CallContext): ApprovalBroker {
     return new ApprovalBroker({
       config: this.policy.approvals,
-      store: this.approvalStore.scoped(scope),
-      elicit: this.elicitFn(),
+      store: this.approvalStore.scoped(ctx.scope),
+      elicit: this.elicitFn(ctx.server),
       redactKeys: this.policy.audit.redact
     });
   }
@@ -290,18 +363,18 @@ export class Gateway {
   /** Runs one upstream call through the shared enforcement pipeline. */
   private async dispatch(
     entry: GatewayTool,
-    args: Record<string, unknown>
+    args: Record<string, unknown>,
+    ctx: CallContext
   ): Promise<{ isError?: boolean; content: { type: "text"; text: string }[] }> {
-    const scope = this.scopeFor(this.tenantValue);
-    const disabled = this.exposureBlock(scope, entry.localName);
+    const disabled = this.exposureBlock(ctx.scope, entry.localName);
     const outcome = await enforceCall(
       {
         policy: this.policy,
         audit: this.audit,
-        approvals: this.broker(scope),
-        tenantValue: this.tenantValue,
+        approvals: this.broker(ctx),
+        tenantValue: ctx.tenantValue,
         actor: "agent",
-        session: this.session
+        session: ctx.session
       },
       {
         tool: entry.localName,
