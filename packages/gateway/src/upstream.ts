@@ -1,6 +1,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { credentialFetch } from "./credential.js";
 import { EgressDenied, type EgressGuard } from "@hmcp/core";
 import type { Upstream } from "./config.js";
 
@@ -65,7 +66,17 @@ export class UpstreamConnection {
       await egress.resolveVerified(new URL(spec.url).hostname);
       await client.connect(
         new StreamableHTTPClientTransport(new URL(spec.url), {
-          requestInit: { headers: spec.headers }
+          requestInit: { headers: spec.headers },
+          /*
+           * One client for the process, with the headers decided at send time
+           * rather than baked in here. This is what lets a caller's own
+           * credential reach the upstream without the gateway ever storing
+           * one, and it re-runs the egress check per request instead of only
+           * at connect. Outside a tool call -- here, and for tool discovery
+           * -- there is no credential in scope, so these requests carry the
+           * configured headers and nothing else.
+           */
+          fetch: credentialFetch(spec, egress)
         })
       );
     }

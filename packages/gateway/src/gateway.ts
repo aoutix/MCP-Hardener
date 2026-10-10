@@ -17,6 +17,7 @@ import {
 import { enforceCall } from "@hmcp/server-runtime";
 import { findInjection, scan, type ScanTool } from "@hmcp/scanner";
 import { classify } from "./classify.js";
+import { withCredential, type UpstreamCredential } from "./credential.js";
 import { UpstreamConnection, type UpstreamTool } from "./upstream.js";
 import type { GatewayConfig } from "./config.js";
 
@@ -64,6 +65,15 @@ export interface CallContext {
   readonly session: string;
   /** The `Server` this call arrived on, for elicitation back to that client. */
   readonly server: Server;
+  /**
+   * The caller's own upstream credential, when they presented one.
+   *
+   * Carried, never stored: it lives for the duration of one call and reaches
+   * the upstream through an AsyncLocalStorage the transport's `fetch` reads.
+   * Nothing writes it to disk, and it is absent from the audit record for the
+   * same reason the upstream credential always has been.
+   */
+  readonly credential: UpstreamCredential | undefined;
 }
 
 export class Gateway {
@@ -364,10 +374,16 @@ export class Gateway {
      * the request before it reaches a handler, so a call that gets here
      * without a tenant is one whose policy never wanted one.
      */
-    const auth = (extra as { authInfo?: { extra?: { tenant?: unknown } } } | undefined)?.authInfo;
+    const auth = (extra as { authInfo?: { token?: string; extra?: { tenant?: unknown } } } | undefined)?.authInfo;
     const perRequest = typeof auth?.extra?.tenant === "string" ? auth.extra.tenant : undefined;
     const tenantValue = perRequest ?? this.tenantValue;
-    return { scope: this.scopeFor(tenantValue), tenantValue, session, server };
+    return {
+      scope: this.scopeFor(tenantValue),
+      tenantValue,
+      session,
+      server,
+      credential: auth?.token ? { token: auth.token, tenant: tenantValue } : undefined
+    };
   }
 
   /** The tenant configuration this gateway runs under, for the HTTP layer. */
@@ -412,7 +428,17 @@ export class Gateway {
         ...(disabled ? { disabled } : {}),
         target: `${entry.upstream.spec.name} → ${entry.tool.name}`,
         run: async () => {
-          const result = await entry.upstream.callTool(entry.tool.name, args);
+          /*
+           * The narrowest possible window for the caller's credential: around
+           * this one upstream call, and nothing else. Entering it any wider --
+           * around the HTTP handler, say -- would put a tenant's token in
+           * scope during startup discovery and during tools/list, where it
+           * has no business being. Here, a leak into those paths is not
+           * unlikely, it is impossible.
+           */
+          const result = await withCredential(ctx.credential, () =>
+            entry.upstream.callTool(entry.tool.name, args)
+          );
           return {
             result,
             upstream: {

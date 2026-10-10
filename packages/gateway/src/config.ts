@@ -5,6 +5,36 @@ import { z } from "zod";
 import { expandPath, parsePolicy, type Policy } from "@hmcp/core";
 
 /** One MCP server the gateway sits in front of. */
+/**
+ * Relaying the caller's own credential to this upstream instead of holding
+ * one for it.
+ *
+ * Off by default: forwarding a credential somewhere is a decision, and an
+ * upstream that was configured with a static header should keep behaving the
+ * way it does until someone says otherwise.
+ */
+export const CredentialPassthroughSchema = z
+  .object({
+    enabled: z.boolean().default(false),
+    /** Where the caller's token is placed on the upstream request. */
+    header: z.string().min(1).default("authorization"),
+    /** Refuse the call rather than fall back to the static headers. */
+    required: z.boolean().default(false),
+    /**
+     * `shared` keeps one upstream connection for the process and varies only
+     * the credential, which is what nearly every HTTP API wants. `per-tenant`
+     * is reserved for an upstream that binds its MCP session to whichever
+     * token initialized it; it is not implemented yet and is rejected rather
+     * than silently behaving like `shared`.
+     */
+    session: z.enum(["shared", "per-tenant"]).default("shared")
+  })
+  .strict()
+  .refine((v) => v.session === "shared", {
+    message: 'credential_passthrough.session "per-tenant" is not implemented yet'
+  });
+export type CredentialPassthrough = z.infer<typeof CredentialPassthroughSchema>;
+
 export const UpstreamSchema = z.discriminatedUnion("transport", [
   z
     .object({
@@ -30,7 +60,23 @@ export const UpstreamSchema = z.discriminatedUnion("transport", [
         .regex(/^[a-z0-9_]+$/, "an upstream name must be lowercase letters, digits and underscores"),
       transport: z.literal("http"),
       url: z.string().url(),
-      headers: z.record(z.string(), z.string()).default({})
+      /*
+       * Static headers, sent on every request to this upstream. Note there is
+       * no `${VAR}` expansion and deliberately none: a literal `${...}` here
+       * used to be sent verbatim, so a config that looked like it was
+       * interpolating a secret was actually shipping the word. It is rejected
+       * rather than quietly honoured, and a per-caller credential belongs in
+       * credential_passthrough anyway.
+       */
+      headers: z
+        .record(z.string(), z.string())
+        .refine((h) => !Object.values(h).some((v) => /\$\{[^}]*\}/.test(v)), {
+          message:
+            "a header value contains ${...}, which is not expanded. Use credential_passthrough for a " +
+            "per-caller token, or put the literal value here."
+        })
+        .default({}),
+      credential_passthrough: CredentialPassthroughSchema.default(() => CredentialPassthroughSchema.parse({}))
     })
     .strict()
 ]);
