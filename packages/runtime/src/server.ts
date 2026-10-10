@@ -6,6 +6,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import {
   ApprovalBroker,
   ApprovalStore,
+  NO_TENANT,
   AuditLog,
   EgressGuard,
   expandPath,
@@ -14,6 +15,7 @@ import {
   policyDigest,
   requireTenant,
   type ElicitFn,
+  type ScopedApprovals,
   type Policy
 } from "@hmcp/core";
 import { parseToolsFile, type ToolDescriptor, type ToolsFile } from "./descriptor.js";
@@ -78,6 +80,8 @@ export class HardenedServer {
   private readonly egress: EgressGuard;
   private readonly audit: AuditLog;
   private readonly approvalStore: ApprovalStore;
+  /** This server's own rows in that store: its component, its tenant. */
+  private readonly scoped: ScopedApprovals;
   private readonly session = randomUUID();
   private readonly baseUrl: string;
   private tenantValue: string | undefined;
@@ -112,6 +116,16 @@ export class HardenedServer {
       cwd: options.cwd
     });
     this.approvalStore = new ApprovalStore(this.policy.approvals.store_path, options.cwd);
+    /*
+     * One scope for the life of the process, because a generated server binds
+     * to one tenant at startup and keeps it. The approvals database is shared
+     * between servers by default, so this is what keeps this server's rows
+     * apart from everyone else's in it.
+     */
+    this.scoped = this.approvalStore.scoped({
+      component: this.component,
+      tenant: this.tenantValue ?? NO_TENANT
+    });
 
     this.server = new McpServer(
       { name: `hmcp-${slug(options.tools.api.title)}`, version: options.tools.api.version },
@@ -178,7 +192,7 @@ export class HardenedServer {
       // right cadence and already has the database open, so a reader can tell
       // a running server's claim from one a dead process left behind.
       this.approvalStore.touchRuntimeState(this.component, process.pid);
-      disabled = new Set(this.approvalStore.listDisabledTools(this.component).map((r) => r.tool));
+      disabled = new Set(this.scoped.listDisabledTools().map((r) => r.tool));
     } catch {
       // The store is unreadable. Leave the advertised list alone rather than
       // guessing in either direction; the per-call check below reads it again
@@ -203,7 +217,7 @@ export class HardenedServer {
    */
   private exposureBlock(tool: string): { reason: string } | undefined {
     try {
-      const row = this.approvalStore.toolExposure(this.component, tool);
+      const row = this.scoped.toolExposure(tool);
       return row ? { reason: exposureDeniedReason(row) } : undefined;
     } catch (err) {
       return {
@@ -229,7 +243,7 @@ export class HardenedServer {
   private broker(): ApprovalBroker {
     return new ApprovalBroker({
       config: this.policy.approvals,
-      store: this.approvalStore,
+      store: this.scoped,
       elicit: this.elicitFn(),
       redactKeys: this.policy.audit.redact
     });

@@ -7,9 +7,11 @@ import {
   ApprovalStore,
   AuditLog,
   EgressGuard,
+  NO_TENANT,
   requireTenant,
   type ElicitFn,
-  type Policy
+  type Policy,
+  type Scope
 } from "@hmcp/core";
 import { enforceCall } from "@hmcp/server-runtime";
 import { findInjection, scan, type ScanTool } from "@hmcp/scanner";
@@ -54,15 +56,18 @@ export class Gateway {
   private readonly connections: UpstreamConnection[] = [];
   private readonly tools = new Map<string, GatewayTool>();
   private tenantValue: string | undefined;
+  /** The audit `component`, which is also half of every storage scope. */
+  private readonly component: string;
 
   constructor(options: GatewayOptions) {
     this.config = options.config;
     this.policy = options.policy;
     this.egress = new EgressGuard(options.policy.egress);
+    this.component = `gateway:${options.config.name}`;
     this.audit = new AuditLog({
       config: options.policy.audit,
       session: this.session,
-      component: `gateway:${options.config.name}`,
+      component: this.component,
       cwd: options.cwd
     });
     this.approvalStore = new ApprovalStore(options.policy.approvals.store_path, options.cwd);
@@ -219,10 +224,21 @@ export class Gateway {
       }) as never;
   }
 
-  private broker(): ApprovalBroker {
+  /**
+   * The scope one call's rows belong to.
+   *
+   * Takes the tenant rather than reading `this.tenantValue`, because a hosted
+   * gateway resolves the tenant per request while a stdio one resolves it once
+   * at startup. Passing it in is what lets both share this code.
+   */
+  private scopeFor(tenant: string | undefined): Scope {
+    return { component: this.component, tenant: tenant ?? NO_TENANT };
+  }
+
+  private broker(scope: Scope): ApprovalBroker {
     return new ApprovalBroker({
       config: this.policy.approvals,
-      store: this.approvalStore,
+      store: this.approvalStore.scoped(scope),
       elicit: this.elicitFn(),
       redactKeys: this.policy.audit.redact
     });
@@ -237,7 +253,7 @@ export class Gateway {
       {
         policy: this.policy,
         audit: this.audit,
-        approvals: this.broker(),
+        approvals: this.broker(this.scopeFor(this.tenantValue)),
         tenantValue: this.tenantValue,
         actor: "agent",
         session: this.session

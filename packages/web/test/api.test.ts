@@ -368,11 +368,13 @@ describe("the function list", () => {
 
 describe("a shared approvals database", () => {
   it("shows only the approvals belonging to this server", async () => {
-    // Two generated servers share ~/.hmcp/approvals.sqlite by default, and an
-    // approval row names the tool but not the server. A request for a tool this
-    // server does not expose belongs to someone else and must not appear here.
-    const { ApprovalStore, bindingHash } = await import("@hmcp/core");
-    const store = new ApprovalStore(join(dir, "approvals.sqlite"));
+    // Two generated servers share ~/.hmcp/approvals.sqlite by default. The row
+    // now records which component and tenant it belongs to, so a request
+    // parked by another server is filtered out by the database rather than by
+    // guessing from the tool name -- which could not tell two deployments of
+    // the same server apart at all.
+    const { ApprovalStore, bindingHash, componentScope } = await import("@hmcp/core");
+    const db = new ApprovalStore(join(dir, "approvals.sqlite"));
     const base = (tool: string) => ({
       id: `apr_${tool}`,
       created_at: Date.now(),
@@ -385,16 +387,21 @@ describe("a shared approvals database", () => {
       actor: "agent",
       session: "s"
     });
-    store.insertPending(base("create_invoice"));
-    store.insertPending(base("some_other_servers_tool"));
-    store.close();
+    const mine = { component: "generated:Billing", tenant: "org_test" };
+    db.scoped(mine).insertPending(base("create_invoice"));
+    // Another server entirely.
+    db.scoped(componentScope("generated:Payroll")).insertPending(base("some_other_servers_tool"));
+    // And the case no tool-name filter could ever catch: the same server, the
+    // same tool, a different customer.
+    db.scoped({ ...mine, tenant: "org_other" }).insertPending(base("create_invoice_for_someone_else"));
+    db.close();
 
     const pending = await (await api("/api/v1/servers/billing/approvals/pending")).json();
     expect(pending.map((r: { tool: string }) => r.tool)).toEqual(["create_invoice"]);
 
     const p = await (await api("/api/v1/servers/billing/protection")).json();
     expect(p.approvals.pendingCount).toBe(1);
-    expect(p.approvals.pendingElsewhere).toBe(1);
+    expect(p.approvals.pendingElsewhere).toBe(2);
   });
 });
 

@@ -39,11 +39,12 @@ export interface ToolExposureRow {
 export const EXPOSURE_SCHEMA = `
 CREATE TABLE IF NOT EXISTS tool_exposure (
   component TEXT NOT NULL,
+  tenant    TEXT NOT NULL DEFAULT '',
   tool      TEXT NOT NULL,
   reason    TEXT NOT NULL,
   set_at    INTEGER NOT NULL,
   set_by    TEXT NOT NULL,
-  PRIMARY KEY (component, tool)
+  PRIMARY KEY (component, tenant, tool)
 );
 `;
 

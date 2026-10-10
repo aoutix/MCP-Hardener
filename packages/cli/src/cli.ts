@@ -36,7 +36,7 @@ program
     run(() => {
       const store = openStore(options);
       try {
-        const rows = store.listPending();
+        const rows = store.listPendingAll();
         if (options.json) {
           log(JSON.stringify(rows, null, 2));
           return;
@@ -84,7 +84,7 @@ program
     run(() => {
       const store = openStore(options);
       try {
-        const rows = store.list(Number(options.limit));
+        const rows = store.listAll(Number(options.limit));
         if (rows.length === 0) {
           log("No approval requests have been recorded.");
           return;
@@ -92,7 +92,7 @@ program
         for (const row of rows) {
           const decided = row.decided_at ? new Date(row.decided_at).toISOString() : "-";
           log(
-            `${row.id}  ${row.state.padEnd(8)} ${row.tool.padEnd(28)} ` +
+            `${row.id}  ${row.state.padEnd(8)} ${scopeLabel(row).padEnd(30)} ${row.tool.padEnd(28)} ` +
               `${(row.effect ?? "?").padEnd(12)} by ${(row.decided_by ?? "-").padEnd(14)} ${decided}`
           );
         }
@@ -106,7 +106,7 @@ function decideOne(id: string, state: "granted" | "denied", options: Record<stri
   run(() => {
     const store = openStore(options);
     try {
-      const existing = store.get(id);
+      const existing = store.getAny(id);
       if (!existing) throw new CliError(`no approval request with id "${id}". Run "hmcp pending" to see what is open.`);
       if (existing.state !== "pending") {
         throw new CliError(
@@ -118,7 +118,7 @@ function decideOne(id: string, state: "granted" | "denied", options: Record<stri
       log(describe(existing));
       log("");
 
-      const row = store.decide(id, state, actor(), (options["note"] as string) ?? "");
+      const row = store.decideAny(id, state, actor(), (options["note"] as string) ?? "");
       if (!row) throw new CliError(`approval "${id}" could not be decided; it may have just expired.`);
 
       log(
@@ -133,6 +133,19 @@ function decideOne(id: string, state: "granted" | "denied", options: Record<stri
   });
 }
 
+/**
+ * Which server and customer a row belongs to, for an operator reading a file
+ * that holds several of both.
+ *
+ * A row written before scoping existed carries neither, and says so rather
+ * than being quietly attributed to whoever is looking.
+ */
+function scopeLabel(row: { component: string; tenant: string }): string {
+  if (!row.component && !row.tenant) return "(unscoped, pre-upgrade)";
+  const tenant = row.tenant ? `/${row.tenant}` : "";
+  return `${row.component || "(none)"}${tenant}`;
+}
+
 function describe(row: ApprovalRow): string {
   let args = row.args_redacted;
   try {
@@ -142,6 +155,7 @@ function describe(row: ApprovalRow): string {
   }
   return [
     `  id:       ${row.id}`,
+    `  scope:    ${scopeLabel(row)}`,
     `  tool:     ${row.tool}  (${row.effect ?? "unclassified"})`,
     `  asked by: ${row.actor}  session ${row.session.slice(0, 8)}`,
     `  because:  ${row.reason}`,

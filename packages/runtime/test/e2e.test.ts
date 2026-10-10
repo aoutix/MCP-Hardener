@@ -8,6 +8,13 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { ApprovalStore, parsePolicy, policyDigest, readAuditLog, verifyAuditLog } from "@hmcp/core";
+
+/**
+ * The scope the server under test writes its rows under: its component, and
+ * the tenant `TEST_ORG` resolves to. A test that opened the database
+ * unscoped would be asserting against rows the server cannot see.
+ */
+const SCOPE = { component: "generated:Billing", tenant: "acme" };
 import { HardenedServer, parseToolsFile, type ToolsFile } from "../src/index.js";
 
 /* -------------------------------------------------------- a stand-in REST API */
@@ -428,12 +435,13 @@ describe("approvals out of band", () => {
       const id = /apr_[0-9a-f]+/.exec(textOf(first))![0];
 
       // A human reviews it from a separate process.
-      const store = new ApprovalStore(join(dir, "approvals.sqlite"));
+      const storeDb = new ApprovalStore(join(dir, "approvals.sqlite"));
+      const store = storeDb.scoped(SCOPE);
       const pending = store.listPending();
       expect(pending).toHaveLength(1);
       expect(pending[0]!.tool).toBe("create_invoice");
       store.decide(id, "granted", "alice", "spoke to finance");
-      store.close();
+      storeDb.close();
 
       const second = await h.client.callTool({ name: "create_invoice", arguments: args });
       expect(second.isError).toBeFalsy();
@@ -454,9 +462,10 @@ describe("approvals out of band", () => {
       const first = await h.client.callTool({ name: "create_invoice", arguments: { amount: 10, currency: "usd" } });
       const id = /apr_[0-9a-f]+/.exec(textOf(first))![0];
 
-      const store = new ApprovalStore(join(dir, "approvals.sqlite"));
+      const storeDb = new ApprovalStore(join(dir, "approvals.sqlite"));
+      const store = storeDb.scoped(SCOPE);
       store.decide(id, "granted", "alice");
-      store.close();
+      storeDb.close();
 
       // Same tool, approved moments ago, but different arguments.
       const swapped = await h.client.callTool({
@@ -545,7 +554,8 @@ describe("standing grants, end to end", () => {
 
       // A human pre-approves a class of call from a separate process, exactly
       // as the console does.
-      const store = new ApprovalStore(join(dir, "approvals.sqlite"));
+      const storeDb = new ApprovalStore(join(dir, "approvals.sqlite"));
+      const store = storeDb.scoped(SCOPE);
       const grant = store.createGrant({
         tool_match: "create_invoice",
         constraints: { amount: { max: 5000 } },
@@ -554,7 +564,7 @@ describe("standing grants, end to end", () => {
         reason: "month-end invoicing run",
         created_by: "alice"
       });
-      store.close();
+      storeDb.close();
 
       const first = await h.client.callTool({ name: "create_invoice", arguments: args });
       expect(first.isError).toBeFalsy();
@@ -583,7 +593,8 @@ describe("standing grants, end to end", () => {
   it("parks a call whose arguments miss the grant's bounds instead of refusing it", async () => {
     const h = await harness();
     try {
-      const store = new ApprovalStore(join(dir, "approvals.sqlite"));
+      const storeDb = new ApprovalStore(join(dir, "approvals.sqlite"));
+      const store = storeDb.scoped(SCOPE);
       const grant = store.createGrant({
         tool_match: "create_invoice",
         constraints: { amount: { max: 100 } },
@@ -592,7 +603,7 @@ describe("standing grants, end to end", () => {
         reason: "small invoices only",
         created_by: "alice"
       });
-      store.close();
+      storeDb.close();
 
       // Over the grant's ceiling but within the policy rule's, so the correct
       // outcome is the ordinary human review, not a denial.
@@ -604,10 +615,11 @@ describe("standing grants, end to end", () => {
       expect(textOf(result)).toContain("hmcp approve");
       expect(received).toHaveLength(0);
 
-      const after = new ApprovalStore(join(dir, "approvals.sqlite"));
+      const afterDb = new ApprovalStore(join(dir, "approvals.sqlite"));
+      const after = afterDb.scoped(SCOPE);
       expect(after.getGrant(grant.id)!.uses).toBe(0);
       expect(after.listPending()).toHaveLength(1);
-      after.close();
+      afterDb.close();
     } finally {
       await h.close();
     }
@@ -616,7 +628,8 @@ describe("standing grants, end to end", () => {
   it("never releases a call that policy denied", async () => {
     const h = await harness();
     try {
-      const store = new ApprovalStore(join(dir, "approvals.sqlite"));
+      const storeDb = new ApprovalStore(join(dir, "approvals.sqlite"));
+      const store = storeDb.scoped(SCOPE);
       // As wide as the schema allows: it still must not reach a denied tool,
       // because a grant is only ever consulted on an "approve" verdict.
       const grant = store.createGrant({
@@ -626,16 +639,17 @@ describe("standing grants, end to end", () => {
         reason: "deliberately over-broad",
         created_by: "alice"
       });
-      store.close();
+      storeDb.close();
 
       const result = await h.client.callTool({ name: "delete_invoice", arguments: { invoice_id: "inv_1" } });
       expect(result.isError).toBe(true);
       expect(textOf(result)).toContain("Refused by policy");
       expect(received).toHaveLength(0);
 
-      const after = new ApprovalStore(join(dir, "approvals.sqlite"));
+      const afterDb = new ApprovalStore(join(dir, "approvals.sqlite"));
+      const after = afterDb.scoped(SCOPE);
       expect(after.getGrant(grant.id)!.uses).toBe(0);
-      after.close();
+      afterDb.close();
     } finally {
       await h.close();
     }
@@ -655,15 +669,17 @@ async function waitFor(check: () => Promise<boolean>, timeoutMs = 2000): Promise
 describe("the console's exposure switch", () => {
   /** What the console writes when someone flips the switch. */
   function switchOff(tool: string, reason = "switched off for the test"): void {
-    const store = new ApprovalStore(join(dir, "approvals.sqlite"), dir);
-    store.disableTool("generated:Billing", tool, "reviewer", reason);
-    store.close();
+    const storeDb = new ApprovalStore(join(dir, "approvals.sqlite"), dir);
+    const store = storeDb.scoped(SCOPE);
+    store.disableTool(tool, "reviewer", reason);
+    storeDb.close();
   }
 
   function switchOn(tool: string): void {
-    const store = new ApprovalStore(join(dir, "approvals.sqlite"), dir);
-    store.enableTool("generated:Billing", tool);
-    store.close();
+    const storeDb = new ApprovalStore(join(dir, "approvals.sqlite"), dir);
+    const store = storeDb.scoped(SCOPE);
+    store.enableTool(tool);
+    storeDb.close();
   }
 
   it("stops a read policy allows, without touching the upstream, and records why", async () => {
@@ -749,8 +765,10 @@ describe("the console's exposure switch", () => {
 
 describe("telling the console which policy is in force", () => {
   function state() {
+    // Unscoped on purpose: runtime state is per-process, not per-tenant, so it
+    // lives on the store itself rather than on a scoped view.
     const store = new ApprovalStore(join(dir, "approvals.sqlite"), dir);
-    const row = store.runtimeState("generated:Billing");
+    const row = store.runtimeState(SCOPE.component);
     store.close();
     return row;
   }

@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { ApprovalStore, parsePolicy, readAuditLog, verifyAuditLog } from "@hmcp/core";
+import { ApprovalStore, componentScope, parsePolicy, readAuditLog, verifyAuditLog } from "@hmcp/core";
 import { GatewayConfigSchema } from "../src/config.js";
 import { Gateway } from "../src/gateway.js";
 
@@ -186,9 +186,10 @@ describe("enforcement", () => {
       expect(await upstreamCalls(h)).toHaveLength(0);
 
       const id = /apr_[0-9a-f]+/.exec(textOf(first))![0];
-      const store = new ApprovalStore(join(dir, "approvals.sqlite"));
+      const storeDb = new ApprovalStore(join(dir, "approvals.sqlite"));
+      const store = storeDb.scoped(componentScope(`gateway:${config().name}`));
       store.decide(id, "granted", "alice");
-      store.close();
+      storeDb.close();
 
       const second = await h.client.callTool({ name: "notes__create_note", arguments: args });
       expect(second.isError).toBeFalsy();

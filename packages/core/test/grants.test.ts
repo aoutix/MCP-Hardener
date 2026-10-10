@@ -1,17 +1,32 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   ApprovalStore,
+  componentScope,
   MAX_GRANT_TTL_SECONDS,
   grantIsLive,
   grantMatches,
   parseGrantDraft,
+  type ScopedApprovals,
   type StandingGrantDraft
 } from "../src/index.js";
 
 const HOUR = 60 * 60 * 1000;
 
-function store(): ApprovalStore {
-  return new ApprovalStore(":memory:");
+/*
+ * Scoped, because every grant query is now filtered by whose grant it is. The
+ * view borrows the connection rather than owning it, so the handles are closed
+ * here instead of by the thing under test.
+ */
+const open: ApprovalStore[] = [];
+
+afterEach(() => {
+  for (const s of open.splice(0)) s.close();
+});
+
+function store(): ScopedApprovals {
+  const db = new ApprovalStore(":memory:");
+  open.push(db);
+  return db.scoped(componentScope("generated:Billing"));
 }
 
 function draft(overrides: Partial<StandingGrantDraft> = {}): StandingGrantDraft {
@@ -31,7 +46,6 @@ describe("grant matching", () => {
     expect(grantMatches(g, "create_invoice", "write", {}).matches).toBe(true);
     expect(grantMatches(g, "update_invoice", "write", {}).matches).toBe(true);
     expect(grantMatches(g, "delete_invoice", "destructive", {}).matches).toBe(false);
-    s.close();
   });
 
   it("restricts by effect when one is named, and matches any effect when null", () => {
@@ -44,7 +58,6 @@ describe("grant matching", () => {
     const miss = grantMatches(writeOnly, "create_invoice", "destructive", {});
     expect(miss.matches).toBe(false);
     expect(miss.reason).toContain("grant covers write calls");
-    s.close();
   });
 
   it("checks arguments with the policy engine's own constraint checker", () => {
@@ -60,7 +73,6 @@ describe("grant matching", () => {
     expect(overAmount.reason).toContain("amount");
 
     expect(grantMatches(g, "create_invoice", "write", { amount: 10, currency: "eur" }).matches).toBe(false);
-    s.close();
   });
 
   it("treats an unreadable constraint column as no match, never as permission", () => {
@@ -70,7 +82,6 @@ describe("grant matching", () => {
     const result = grantMatches(corrupt, "create_invoice", "write", {});
     expect(result.matches).toBe(false);
     expect(result.reason).toContain("unreadable");
-    s.close();
   });
 });
 
@@ -82,7 +93,6 @@ describe("grant lifecycle", () => {
     expect(s.expireStaleGrants()).toBe(1);
     expect(s.getGrant(g.id)!.state).toBe("expired");
     expect(s.consumeGrant("create_invoice", "write", {})).toBeUndefined();
-    s.close();
   });
 
   it("charges one use per call and exhausts at the cap", () => {
@@ -94,7 +104,6 @@ describe("grant lifecycle", () => {
     expect(second.uses).toBe(2);
     expect(second.state).toBe("exhausted");
     expect(s.consumeGrant("create_invoice", "write", {})).toBeUndefined();
-    s.close();
   });
 
   it("releases without limit when no cap is set", () => {
@@ -103,7 +112,6 @@ describe("grant lifecycle", () => {
     for (let i = 0; i < 5; i++) {
       expect(s.consumeGrant("create_invoice", "write", {})).toBeDefined();
     }
-    s.close();
   });
 
   it("stops releasing once revoked", () => {
@@ -114,7 +122,6 @@ describe("grant lifecycle", () => {
     // Revoking twice is not an error the caller can act on, but it must not
     // silently look like a fresh revocation either.
     expect(s.revokeGrant(g.id, "tester")).toBeUndefined();
-    s.close();
   });
 
   it("uses the oldest matching grant first, like the exact-argument path does", () => {
@@ -122,7 +129,6 @@ describe("grant lifecycle", () => {
     const older = s.createGrant(draft({ max_uses: 1, reason: "older" }), Date.now() - 1000);
     s.createGrant(draft({ max_uses: 1, reason: "newer" }), Date.now());
     expect(s.consumeGrant("create_invoice", "write", {})!.id).toBe(older.id);
-    s.close();
   });
 
   it("falls through to a later grant when the first is exhausted", () => {
@@ -131,7 +137,6 @@ describe("grant lifecycle", () => {
     const second = s.createGrant(draft({ max_uses: 1, reason: "second" }), Date.now());
     expect(s.consumeGrant("create_invoice", "write", {})!.id).toBe(first.id);
     expect(s.consumeGrant("create_invoice", "write", {})!.id).toBe(second.id);
-    s.close();
   });
 
   it("never lets concurrent calls exceed the use cap", () => {
@@ -143,7 +148,6 @@ describe("grant lifecycle", () => {
       (r) => r !== undefined
     );
     expect(released).toHaveLength(3);
-    s.close();
   });
 });
 

@@ -322,6 +322,15 @@ export interface AuditQuery {
   /** Glob over the tool name, same dialect as policy rule patterns. */
   readonly tool?: string;
   readonly component?: readonly string[];
+  /**
+   * Whose data the call touched.
+   *
+   * One log file holds every tenant's records — the hash chain is per file, so
+   * splitting it is not free — which makes this the only way to read one
+   * tenant's history out of it. `""` selects records from a deployment with no
+   * tenant configured, and from anything written before the field was set.
+   */
+  readonly tenant?: readonly string[];
   readonly actor?: readonly string[];
   /** Inclusive ISO 8601 bounds on `ts`. */
   readonly since?: string;
@@ -440,6 +449,7 @@ function matchesQuery(record: AuditRecord, q: AuditQuery): boolean {
   if (q.decision && !q.decision.includes(record.decision)) return false;
   if (q.outcome && !q.outcome.includes(record.outcome)) return false;
   if (q.component && !q.component.includes(record.component)) return false;
+  if (q.tenant && !q.tenant.includes(record.tenant ?? "")) return false;
   if (q.actor && !q.actor.includes(record.actor)) return false;
   if (q.tool && !globMatch(q.tool, record.tool)) return false;
   // ISO 8601 UTC strings order lexicographically, which is why the log stores

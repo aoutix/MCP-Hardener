@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
-import { ApprovalStore, queryAuditLog, verifyAuditLog } from "@hmcp/core";
+import { ApprovalStore, componentScope, queryAuditLog, verifyAuditLog } from "@hmcp/core";
 import { buildRoutes } from "../src/api.js";
 import { createConsoleServer } from "../src/http.js";
 import { closeStores } from "../src/model/server.js";
@@ -216,8 +216,12 @@ describe("switching a function off", () => {
   it("writes a row the running server will read, scoped to that server", async () => {
     const store = new ApprovalStore(storePath, dir);
     try {
-      expect(store.toolExposure("generated:Billing", "create_invoice")).toBeDefined();
-      expect(store.toolExposure("generated:Payroll", "create_invoice")).toBeUndefined();
+      expect(store.scoped(componentScope("generated:Billing")).toolExposure("create_invoice")).toBeDefined();
+      expect(store.scoped(componentScope("generated:Payroll")).toolExposure("create_invoice")).toBeUndefined();
+      // And the axis the component key alone could never express.
+      expect(
+        store.scoped({ component: "generated:Billing", tenant: "acme" }).toolExposure("create_invoice")
+      ).toBeUndefined();
     } finally {
       store.close();
     }

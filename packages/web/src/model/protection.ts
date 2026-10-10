@@ -15,7 +15,7 @@ import {
 } from "@hmcp/core";
 import type { ToolDescriptor } from "@hmcp/server-runtime";
 import type { Finding, ScanTool } from "@hmcp/scanner";
-import { describeTenantSource, storeFor, type LoadedServer } from "./server.js";
+import { describeTenantSource, scopedFor, storeFor, type LoadedServer } from "./server.js";
 import { ENFORCEMENT_PIPELINE } from "./pipeline.js";
 import { runScan } from "./scan.js";
 
@@ -246,7 +246,7 @@ export type Reach = "read-only" | "approve-writes" | "locked";
 export function effectiveReach(server: LoadedServer): Reach {
   const policy = server.policy;
   const descriptors = server.tools?.tools ?? [];
-  const disabled = new Set(storeFor(server).listDisabledTools(server.component).map((row) => row.tool));
+  const disabled = new Set(scopedFor(server).listDisabledTools().map((row) => row.tool));
 
   let reachable = 0;
   let mutating = 0;
@@ -388,16 +388,20 @@ export function buildProtection(server: LoadedServer): ServerProtection {
   const toolNames = descriptors.map((t) => t.name);
   const scan = runScan(server);
   const store = storeFor(server);
-  const grants = store.listGrants({ activeOnly: true });
-  // Keyed by `component`, because one approvals database serves several servers
-  // by default and two of them may legitimately expose a tool of the same name.
-  const disabled = new Map(store.listDisabledTools(server.component).map((row) => [row.tool, row]));
+  const scoped = scopedFor(server);
+  const grants = scoped.listGrants({ activeOnly: true });
+  const disabled = new Map(scoped.listDisabledTools().map((row) => [row.tool, row]));
 
-  // The approvals database is shared by default, so split this server's own
-  // waiting calls from everyone else's rather than reporting one total.
-  const names = new Set(descriptors.map((t) => t.name));
-  const allPending = store.listPending(500);
-  const ownPending = names.size === 0 ? allPending : allPending.filter((r) => names.has(r.tool));
+  /*
+   * One database commonly holds several servers' rows, so "waiting" has two
+   * meanings and the console reports both. `own` is this component and this
+   * tenant, which the database filters; `others` is the remainder of the file,
+   * shown so that a queue someone else is responsible for is visible rather
+   * than invisible. This used to be a tool-name heuristic, which could not
+   * tell two tenants of the same server apart at all.
+   */
+  const ownPending = scoped.listPending(500);
+  const allPending = store.listPendingAll(500);
   const pending = { own: ownPending.length, others: allPending.length - ownPending.length };
 
   const written = policy.audit.enabled && existsSync(server.auditPath);

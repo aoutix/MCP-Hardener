@@ -124,3 +124,67 @@ export function tenantInjection(config: TenantConfig, value: string): TenantInje
   }
   return injection;
 }
+
+/**
+ * The reserved tenant key for "this deployment has no tenant configured".
+ *
+ * Empty string rather than NULL, because SQLite permits several NULLs in a
+ * non-rowid PRIMARY KEY column — `tool_exposure` would quietly stop being
+ * unique. Rather than a sentinel like "-", which a real tenant could be
+ * called, because `resolveTenant` already rejects an empty value on both the
+ * env and header branches, so no real tenant can ever be "".
+ */
+export const NO_TENANT = "";
+
+/** The longest tenant key accepted. Generous for an id, short of a payload. */
+const MAX_TENANT_KEY = 256;
+
+/**
+ * Canonicalises a resolved tenant before it is used as a storage key.
+ *
+ * Single-tenant deployments read this value from their own environment and it
+ * is whatever the operator typed. Once a hosted gateway resolves it per
+ * request it is attacker-influenced, and a key that can be spelled two ways is
+ * a key that can be made to collide or to split: `acme` and `acme ` must not
+ * become two scopes, and two different-looking strings must not become one.
+ *
+ * So: NFC, because the same name composed two ways in Unicode must compare
+ * equal; trimmed; length-capped; and restricted to an unambiguous alphabet. A
+ * control character has no business in an identifier and is how a value gets
+ * smuggled past a log line or a terminal.
+ */
+export function normalizeTenantKey(raw: string): string {
+  const value = raw.normalize("NFC").trim();
+  if (value.length === 0) return NO_TENANT;
+  if (value.length > MAX_TENANT_KEY) {
+    throw new TenantError(
+      `tenant identifier is ${value.length} characters; the maximum is ${MAX_TENANT_KEY}`
+    );
+  }
+  if (!/^[A-Za-z0-9._:@-]+$/.test(value)) {
+    throw new TenantError(
+      `tenant identifier ${JSON.stringify(raw)} contains characters that are not allowed. ` +
+        `Letters, digits and ".", "_", ":", "@", "-" only, so that one tenant cannot be ` +
+        `spelled two ways or disguised as another.`
+    );
+  }
+  return value;
+}
+
+/**
+ * What a row in the approvals database belongs to.
+ *
+ * Two axes, because they answer different questions and neither implies the
+ * other. `component` is which server ("generated:Billing"), and is the same
+ * string for every deployment of that server. `tenant` is whose data the call
+ * touches. One database holds rows for many of both.
+ */
+export interface Scope {
+  readonly component: string;
+  readonly tenant: string;
+}
+
+/** A scope for a deployment with no tenant configured. */
+export function componentScope(component: string): Scope {
+  return { component, tenant: NO_TENANT };
+}

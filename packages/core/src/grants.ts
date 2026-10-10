@@ -37,6 +37,10 @@ export type StandingGrantState = "active" | "revoked" | "expired" | "exhausted";
 
 export interface StandingGrantRow {
   readonly id: string;
+  /** Which server this belongs to; "" on a row written before scoping. */
+  readonly component: string;
+  /** Whose data the grant covers; "" when no tenant is configured. */
+  readonly tenant: string;
   readonly created_at: number;
   /** Always set. There are no permanent grants on purpose. */
   readonly expires_at: number;
@@ -59,6 +63,8 @@ export interface StandingGrantRow {
 export const GRANTS_SCHEMA = `
 CREATE TABLE IF NOT EXISTS standing_grants (
   id          TEXT PRIMARY KEY,
+  component   TEXT NOT NULL DEFAULT '',
+  tenant      TEXT NOT NULL DEFAULT '',
   created_at  INTEGER NOT NULL,
   expires_at  INTEGER NOT NULL,
   tool_match  TEXT NOT NULL,
@@ -72,7 +78,7 @@ CREATE TABLE IF NOT EXISTS standing_grants (
   revoked_at  INTEGER,
   revoked_by  TEXT
 );
-CREATE INDEX IF NOT EXISTS grants_active ON standing_grants (state, expires_at);
+CREATE INDEX IF NOT EXISTS grants_active ON standing_grants (component, tenant, state, expires_at);
 `;
 
 export function newGrantId(): string {

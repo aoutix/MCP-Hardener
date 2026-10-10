@@ -191,3 +191,31 @@ describe("queryAuditLog", () => {
     expect(queryAuditLog(logPath).records.map((r) => r.seq)).toEqual([2, 1, 0]);
   });
 });
+
+describe("filtering by tenant", () => {
+  it("reads one customer's history out of a log that holds everyone's", () => {
+    // The hash chain is per file, so a hosted gateway interleaves every
+    // tenant's records in one log. This filter is the only way back out.
+    const log = makeLog();
+    log.append({ tool: "create_invoice", decision: "allow", outcome: "completed", tenant: "acme" });
+    log.append({ tool: "create_invoice", decision: "allow", outcome: "completed", tenant: "globex" });
+    log.append({ tool: "list_invoices", decision: "allow", outcome: "completed", tenant: "acme" });
+
+    const acme = queryAuditLog(logPath, { tenant: ["acme"] });
+    expect(acme.records.map((r) => r.tool)).toEqual(["list_invoices", "create_invoice"]);
+    expect(acme.records.every((r) => r.tenant === "acme")).toBe(true);
+
+    expect(queryAuditLog(logPath, { tenant: ["globex"] }).records).toHaveLength(1);
+    expect(queryAuditLog(logPath, { tenant: ["acme", "globex"] }).records).toHaveLength(3);
+  });
+
+  it('treats a record with no tenant as ""', () => {
+    // A single-tenant deployment records null, and so does every record
+    // written before the field was populated; neither should be unreachable.
+    const log = makeLog();
+    log.append({ tool: "list_invoices", decision: "allow", outcome: "completed" });
+
+    expect(queryAuditLog(logPath, { tenant: [""] }).records).toHaveLength(1);
+    expect(queryAuditLog(logPath, { tenant: ["acme"] }).records).toHaveLength(0);
+  });
+});

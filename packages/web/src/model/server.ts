@@ -2,12 +2,15 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname } from "node:path";
 import {
   ApprovalStore,
+  NO_TENANT,
   expandPath,
   generatedPaths,
   loadPolicy,
   resolveTenant,
   type Policy,
-  type RegistryEntry
+  type RegistryEntry,
+  type Scope,
+  type ScopedApprovals
 } from "@hmcp/core";
 import { parseToolsFile, type ToolsFile } from "@hmcp/server-runtime";
 import { loadGatewayConfig, type LoadedGatewayConfig } from "hmcp-gateway";
@@ -164,6 +167,24 @@ export function storeFor(server: LoadedServer): ApprovalStore {
   const store = new ApprovalStore(server.storePath, server.cwd);
   stores.set(server.storePath, store);
   return store;
+}
+
+/**
+ * The scope this server's rows live under in that store.
+ *
+ * The console reads a shared database — one file commonly holds rows for
+ * several servers — so every read it makes has to say whose rows it wants.
+ * Until this existed it did not, and the nearest thing to a filter was a
+ * cosmetic check that a row's tool name appeared in this server's tools.json,
+ * which told two deployments of the same server apart not at all.
+ */
+export function scopeOf(server: LoadedServer): Scope {
+  return { component: server.component, tenant: server.tenantValue ?? NO_TENANT };
+}
+
+/** `storeFor` already narrowed to this server and its tenant. */
+export function scopedFor(server: LoadedServer): ScopedApprovals {
+  return storeFor(server).scoped(scopeOf(server));
 }
 
 export function closeStores(): void {

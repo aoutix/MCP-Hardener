@@ -19,7 +19,7 @@ import {
 import { badRequest, conflict, notFound, route, unprocessable, type Route } from "./http.js";
 import { buildProtection, effectiveReach, recentActivity, toolProtection } from "./model/protection.js";
 import { invalidateScan, runScan } from "./model/scan.js";
-import { loadServer, storeFor, type LoadedServer } from "./model/server.js";
+import { loadServer, scopeOf, scopedFor, storeFor, type LoadedServer } from "./model/server.js";
 import { ENFORCEMENT_PIPELINE } from "./model/pipeline.js";
 
 export interface ApiOptions {
@@ -126,21 +126,6 @@ function intParam(query: URLSearchParams, key: string): number | undefined {
   const value = Number(raw);
   if (!Number.isFinite(value)) throw badRequest(`${key} must be a number`);
   return value;
-}
-
-/**
- * Approvals belonging to this server.
- *
- * Several servers share one approvals database by default, and an approval row
- * records the tool but not which server it came from. Showing another server's
- * queue here would be actively misleading, so rows are matched against the
- * tools this server actually exposes. A server with no tool list of its own — a
- * gateway — keeps the unfiltered view, because there is nothing to match on.
- */
-function ownRows(server: LoadedServer, rows: readonly ApprovalRow[]): ApprovalRow[] {
-  const names = new Set((server.tools?.tools ?? []).map((t) => t.name));
-  if (names.size === 0) return [...rows];
-  return rows.filter((r) => names.has(r.tool));
 }
 
 /* ------------------------------------------------------------------- routes */
@@ -284,12 +269,12 @@ export function buildRoutes(options: ApiOptions): Route[] {
         throw unprocessable(`invalid exposure change: ${(err as Error).message}`);
       }
 
-      const store = storeFor(server);
-      const before = store.toolExposure(server.component, name);
+      const scoped = scopedFor(server);
+      const before = scoped.toolExposure(name);
       let warning: string | null = null;
 
       if (change.disabled) {
-        const row = store.disableTool(server.component, name, ctx.actor, change.reason);
+        const row = scoped.disableTool(name, ctx.actor, change.reason);
         // Switching a tool off only ever tightens, so — as with revoking a
         // standing grant — the change is kept even if the record cannot be
         // written, and the failure is reported rather than undoing the fix.
@@ -310,7 +295,7 @@ export function buildRoutes(options: ApiOptions): Route[] {
           warning = `${name} was switched off but the audit record failed: ${(err as Error).message}`;
         }
       } else {
-        const removed = store.enableTool(server.component, name);
+        const removed = scoped.enableTool(name);
         // Nothing was switched off, so nothing changed. Writing a record here
         // would put a permission change in the log that never happened.
         if (removed) {
@@ -330,7 +315,7 @@ export function buildRoutes(options: ApiOptions): Route[] {
           } catch (err) {
             // Unlike the other direction this one loosens, so an unauditable
             // change is put back rather than left in place unrecorded.
-            store.disableTool(server.component, name, removed.set_by, removed.reason);
+            scoped.disableTool(name, removed.set_by, removed.reason);
             throw new Error(
               `${name} was left switched off because switching it on could not be audited: ${(err as Error).message}`
             );
@@ -343,8 +328,8 @@ export function buildRoutes(options: ApiOptions): Route[] {
         server,
         descriptor,
         scan.findings,
-        store.listGrants({ activeOnly: true }),
-        store.toolExposure(server.component, name)
+        scoped.listGrants({ activeOnly: true }),
+        scoped.toolExposure(name)
       );
       return { tool, changed: (before !== undefined) !== change.disabled, warning };
     }),
@@ -359,13 +344,16 @@ export function buildRoutes(options: ApiOptions): Route[] {
 
     route("GET", "/api/v1/servers/:id/approvals/pending", (ctx) => {
       const server = serverById(options, ctx.params["id"]!);
-      const store = storeFor(server);
-      return ownRows(server, store.listPending(intParam(ctx.query, "limit") ?? 50)).map(approvalDto);
+      return scopedFor(server)
+        .listPending(intParam(ctx.query, "limit") ?? 50)
+        .map(approvalDto);
     }),
 
     route("GET", "/api/v1/servers/:id/approvals", (ctx) => {
       const server = serverById(options, ctx.params["id"]!);
-      return ownRows(server, storeFor(server).list(intParam(ctx.query, "limit") ?? 50)).map(approvalDto);
+      return scopedFor(server)
+        .list(intParam(ctx.query, "limit") ?? 50)
+        .map(approvalDto);
     }),
 
     route("POST", "/api/v1/servers/:id/approvals/:aprId/decide", (ctx) => {
@@ -375,8 +363,7 @@ export function buildRoutes(options: ApiOptions): Route[] {
         throw badRequest('state must be "granted" or "denied"');
       }
       const note = typeof body.note === "string" ? body.note : "";
-      const store = storeFor(server);
-      const result = store.decideChecked(ctx.params["aprId"]!, body.state, ctx.actor, note);
+      const result = scopedFor(server).decideChecked(ctx.params["aprId"]!, body.state, ctx.actor, note);
       if (!result.ok) {
         throw result.error.includes("no approval request") ? notFound(result.error) : conflict(result.error);
       }
@@ -402,7 +389,7 @@ export function buildRoutes(options: ApiOptions): Route[] {
     route("GET", "/api/v1/servers/:id/grants", (ctx) => {
       const server = serverById(options, ctx.params["id"]!);
       const activeOnly = ctx.query.get("state") === "active";
-      return storeFor(server)
+      return scopedFor(server)
         .listGrants({ activeOnly, limit: intParam(ctx.query, "limit") ?? 100 })
         .map(grantDto);
     }),
@@ -430,8 +417,8 @@ export function buildRoutes(options: ApiOptions): Route[] {
         throw unprocessable((err as Error).message);
       }
 
-      const store = storeFor(server);
-      const grant = store.createGrant(draft);
+      const scoped = scopedFor(server);
+      const grant = scoped.createGrant(draft);
 
       // The requirement is that no pre-approval exists unaudited, so this uses
       // appendStrict (which throws) rather than append (which only warns), and
@@ -457,21 +444,21 @@ export function buildRoutes(options: ApiOptions): Route[] {
           }
         });
       } catch (err) {
-        store.revokeGrant(grant.id, "system");
+        scoped.revokeGrant(grant.id, "system");
         throw new Error(`the grant was withdrawn because it could not be audited: ${(err as Error).message}`);
       }
 
-      return grantDto(store.getGrant(grant.id)!);
+      return grantDto(scoped.getGrant(grant.id)!);
     }),
 
     route("DELETE", "/api/v1/servers/:id/grants/:grantId", (ctx) => {
       const server = serverById(options, ctx.params["id"]!);
-      const store = storeFor(server);
+      const scoped = scopedFor(server);
       const id = ctx.params["grantId"]!;
-      const existing = store.getGrant(id);
+      const existing = scoped.getGrant(id);
       if (!existing) throw notFound(`no standing grant with id "${id}"`);
 
-      const revoked = store.revokeGrant(id, ctx.actor);
+      const revoked = scoped.revokeGrant(id, ctx.actor);
       if (!revoked) throw conflict(`standing grant ${id} is already ${existing.state}`);
 
       // Revocation tightens, so unlike creation it is kept even if the audit
@@ -523,6 +510,7 @@ export function buildRoutes(options: ApiOptions): Route[] {
 
       const candidate: StandingGrantRow = {
         id: "sg_preview",
+        ...scopeOf(server),
         created_at: Date.now(),
         expires_at: draft.expires_at,
         tool_match: draft.tool_match,
@@ -556,6 +544,10 @@ export function buildRoutes(options: ApiOptions): Route[] {
         ...(csv(ctx.query, "decision") ? { decision: csv(ctx.query, "decision") as DecisionKind[] } : {}),
         ...(csv(ctx.query, "outcome") ? { outcome: csv(ctx.query, "outcome") as AuditRecord["outcome"][] } : {}),
         ...(csv(ctx.query, "component") ? { component: csv(ctx.query, "component")! } : {}),
+        // One log holds every tenant's records, so this is how a reviewer
+        // reads one customer's history out of it. `?tenant=` with an empty
+        // value selects the records that carry no tenant.
+        ...(ctx.query.has("tenant") ? { tenant: csv(ctx.query, "tenant") ?? [""] } : {}),
         ...(ctx.query.get("tool") ? { tool: ctx.query.get("tool")! } : {}),
         ...(ctx.query.get("since") ? { since: ctx.query.get("since")! } : {}),
         ...(ctx.query.get("noteworthy") ? { noteworthy: true } : {})

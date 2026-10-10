@@ -2,22 +2,26 @@ import { describe, expect, it, vi } from "vitest";
 import {
   ApprovalBroker,
   ApprovalStore,
+  componentScope,
   RUNTIME_STATE_TTL_MS,
   bindingHash,
   parsePolicy,
   policyDigest,
-  runtimeStateIsLive
+  runtimeStateIsLive,
+  type ScopedApprovals
 } from "../src/index.js";
+
+const SCOPE = componentScope("generated:Billing");
 
 function setup(overrides: Record<string, unknown> = {}, elicit?: Parameters<typeof makeBroker>[2]) {
   const policy = parsePolicy({ version: 1, approvals: { store_path: ":memory:", ...overrides } });
-  const store = new ApprovalStore(":memory:");
+  const store = new ApprovalStore(":memory:").scoped(SCOPE);
   return { policy, store, broker: makeBroker(policy.approvals, store, elicit) };
 }
 
 function makeBroker(
   config: ReturnType<typeof parsePolicy>["approvals"],
-  store: ApprovalStore,
+  store: ScopedApprovals,
   elicit?: ConstructorParameters<typeof ApprovalBroker>[0]["elicit"]
 ) {
   return new ApprovalBroker({ config, store, elicit });
@@ -115,7 +119,8 @@ describe("argument binding", () => {
 
 describe("expiry", () => {
   it("refuses a grant that has outlived its ttl", async () => {
-    const store = new ApprovalStore(":memory:");
+    const db = new ApprovalStore(":memory:");
+    const store = db.scoped(SCOPE);
     const policy = parsePolicy({ version: 1, approvals: { mode: "cli", ttl_seconds: 60 } });
     let now = 1_000_000;
     const broker = new ApprovalBroker({ config: policy.approvals, store, now: () => now });
@@ -125,13 +130,14 @@ describe("expiry", () => {
     store.decide(first.approvalId!, "granted", "alice");
 
     now += 61_000;
-    store.expireStale(now);
+    db.expireStale(now);
     const retry = await broker.request(call);
     expect(retry.granted).toBe(false);
   });
 
   it("expires a pending request that nobody reviewed", async () => {
-    const store = new ApprovalStore(":memory:");
+    const db = new ApprovalStore(":memory:");
+    const store = db.scoped(SCOPE);
     const policy = parsePolicy({ version: 1, approvals: { mode: "cli", ttl_seconds: 30 } });
     let now = 2_000_000;
     const broker = new ApprovalBroker({ config: policy.approvals, store, now: () => now });
@@ -358,45 +364,65 @@ describe("standing grants in the broker", () => {
 });
 
 describe("exposure overrides", () => {
-  function store(): ApprovalStore {
-    return new ApprovalStore(":memory:");
+  function store(component = "generated:Billing"): ScopedApprovals {
+    return new ApprovalStore(":memory:").scoped(componentScope(component));
   }
 
   it("stores only the off state, so enabling is a deletion rather than a permission", () => {
     const s = store();
-    expect(s.toolExposure("generated:Billing", "delete_invoice")).toBeUndefined();
+    expect(s.toolExposure("delete_invoice")).toBeUndefined();
 
-    s.disableTool("generated:Billing", "delete_invoice", "alice", "incident 412");
-    const row = s.toolExposure("generated:Billing", "delete_invoice")!;
+    s.disableTool("delete_invoice", "alice", "incident 412");
+    const row = s.toolExposure("delete_invoice")!;
     expect(row.set_by).toBe("alice");
     expect(row.reason).toBe("incident 412");
 
-    expect(s.enableTool("generated:Billing", "delete_invoice")!.set_by).toBe("alice");
-    expect(s.toolExposure("generated:Billing", "delete_invoice")).toBeUndefined();
+    expect(s.enableTool("delete_invoice")!.set_by).toBe("alice");
+    expect(s.toolExposure("delete_invoice")).toBeUndefined();
   });
 
   it("reports that there was nothing to enable, so no change is recorded as one", () => {
     const s = store();
-    expect(s.enableTool("generated:Billing", "delete_invoice")).toBeUndefined();
+    expect(s.enableTool("delete_invoice")).toBeUndefined();
   });
 
   it("is idempotent, and a repeat records who last asserted it", () => {
     const s = store();
-    s.disableTool("generated:Billing", "create_invoice", "alice", "first");
-    s.disableTool("generated:Billing", "create_invoice", "bob", "second");
+    s.disableTool("create_invoice", "alice", "first");
+    s.disableTool("create_invoice", "bob", "second");
     expect(s.listDisabledTools("generated:Billing")).toHaveLength(1);
-    expect(s.toolExposure("generated:Billing", "create_invoice")!.set_by).toBe("bob");
-    expect(s.toolExposure("generated:Billing", "create_invoice")!.reason).toBe("second");
+    expect(s.toolExposure("create_invoice")!.set_by).toBe("bob");
+    expect(s.toolExposure("create_invoice")!.reason).toBe("second");
   });
 
   it("scopes by server, because one approvals database is shared by default", () => {
     // Two generated servers may legitimately both expose `list_invoices`.
     // Switching one off must not switch off the other's.
-    const s = store();
-    s.disableTool("generated:Billing", "list_invoices", "alice");
-    expect(s.toolExposure("generated:Billing", "list_invoices")).toBeDefined();
-    expect(s.toolExposure("generated:Payroll", "list_invoices")).toBeUndefined();
-    expect(s.listDisabledTools("generated:Payroll")).toEqual([]);
+    const db = new ApprovalStore(":memory:");
+    const billing = db.scoped(componentScope("generated:Billing"));
+    const payroll = db.scoped(componentScope("generated:Payroll"));
+
+    billing.disableTool("list_invoices", "alice");
+
+    expect(billing.toolExposure("list_invoices")).toBeDefined();
+    expect(payroll.toolExposure("list_invoices")).toBeUndefined();
+    expect(payroll.listDisabledTools()).toEqual([]);
+    db.close();
+  });
+
+  it("scopes by tenant too, so one customer cannot switch off another's tool", () => {
+    // The case the component key alone could never express: one hosted server,
+    // the same component string, two customers.
+    const db = new ApprovalStore(":memory:");
+    const acme = db.scoped({ component: "gateway:hmcp", tenant: "acme" });
+    const globex = db.scoped({ component: "gateway:hmcp", tenant: "globex" });
+
+    acme.disableTool("create_invoice", "alice", "incident 412");
+
+    expect(acme.toolExposure("create_invoice")!.reason).toBe("incident 412");
+    expect(globex.toolExposure("create_invoice")).toBeUndefined();
+    expect(globex.listDisabledTools()).toEqual([]);
+    db.close();
   });
 });
 

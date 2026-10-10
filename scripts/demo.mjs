@@ -367,8 +367,18 @@ async function driveServer(calls) {
 
 if (opts.seed) {
   const policy = loadPolicy(paths.billingPolicy);
-  const store = new ApprovalStore(paths.store, paths.billing);
-  store.expireStale();
+  const db = new ApprovalStore(paths.store, paths.billing);
+  /*
+   * The rows the generated Billing server itself would write and read: its
+   * component, and the tenant BILLING_ORG_ID resolves to. Seeding into any
+   * other scope would put rows in the database that the server cannot see and
+   * the console would not show.
+   */
+  const store = db.scoped({
+    component: "generated:Billing",
+    tenant: process.env["BILLING_ORG_ID"] ?? "org_demo"
+  });
+  db.expireStale();
   const already = store.listPending(100).length;
 
   const memos = [
@@ -416,7 +426,7 @@ if (opts.seed) {
     try {
       await driveServer(calls);
     } catch (err) {
-      store.close();
+      db.close();
       fail(`could not drive the generated server: ${err.message}`);
     }
   }
@@ -476,7 +486,7 @@ if (opts.seed) {
 
   const pending = store.listPending(100).length;
   const total = store.list(200).length;
-  store.close();
+  db.close();
 
   const auditLines = existsSync(paths.audit)
     ? readFileSync(paths.audit, "utf8").split("\n").filter(Boolean).length
