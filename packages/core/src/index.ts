@@ -8,6 +8,7 @@ export * from "./redact.js";
 export * from "./decide.js";
 export * from "./grants.js";
 export * from "./exposure.js";
+export * from "./exposure-apply.js";
 export * from "./runtime-state.js";
 export * from "./resolve.js";
 export * from "./registry.js";

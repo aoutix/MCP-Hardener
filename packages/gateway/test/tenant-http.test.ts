@@ -374,3 +374,47 @@ describe("which agent made the call", () => {
     for (const record of startup) expect(record.actor).toBe("gateway");
   });
 });
+
+describe("a pinned public key instead of a JWKS endpoint", () => {
+  it("reads the algorithm off the key rather than assuming one", async () => {
+    // Assuming RS256 here meant a pinned EC key failed to import, and the
+    // failure surfaced as "the token could not be verified" -- a
+    // configuration error wearing the costume of a bad token.
+    const { exportSPKI } = await import("jose");
+    await boot({
+      tenant: {
+        field: "org_id",
+        inject: [],
+        source: {
+          kind: "jwt-verified",
+          claim: "org_id",
+          public_key: await exportSPKI(signing.publicKey as never),
+          issuer: ISSUER,
+          audience: AUDIENCE
+        }
+      }
+    });
+    const client = await connect(await token({ org_id: "acme", sub: "agent-7" }));
+    const result = await client.callTool({ name: "notes__get_note", arguments: { id: "n1" } });
+    expect((result as { isError?: boolean }).isError).toBeFalsy();
+  });
+
+  it("says so plainly when the key is not one it can use", async () => {
+    await boot({
+      tenant: {
+        field: "org_id",
+        inject: [],
+        source: {
+          kind: "jwt-verified",
+          claim: "org_id",
+          public_key: "-----BEGIN PUBLIC KEY-----\nnot a key\n-----END PUBLIC KEY-----",
+          issuer: ISSUER,
+          audience: AUDIENCE
+        }
+      }
+    });
+    const res = await raw({ authorization: `Bearer ${await token({ org_id: "acme" })}` });
+    expect(res.status).toBe(403);
+    expect(res.body).toContain("not a readable public key");
+  });
+});

@@ -1,4 +1,5 @@
 import { createRemoteJWKSet, customFetch, errors, importSPKI, jwtVerify, type JWTPayload, type KeyObject } from "jose";
+import { createPublicKey } from "node:crypto";
 import { TenantError, normalizeTenantKey } from "./tenant.js";
 import type { EgressGuard } from "./egress.js";
 import type { JwtVerifiedSource } from "./policy.js";
@@ -32,10 +33,35 @@ import type { JwtVerifiedSource } from "./policy.js";
 /** Only asymmetric signatures, and only two. */
 const ALGORITHMS = ["RS256", "ES256"] as const;
 
+/** Which of the two a pinned PEM is for. */
+function algorithmOf(pem: string): (typeof ALGORITHMS)[number] {
+  let type: string | null;
+  try {
+    type = createPublicKey(pem).asymmetricKeyType ?? null;
+  } catch (err) {
+    throw new TenantError(`tenant.source.public_key is not a readable public key: ${(err as Error).message}`);
+  }
+  if (type === "rsa" || type === "rsa-pss") return "RS256";
+  if (type === "ec") return "ES256";
+  throw new TenantError(
+    `tenant.source.public_key is ${type ?? "of an unknown type"}; this gateway verifies ` +
+      `${ALGORITHMS.join(" and ")} only.`
+  );
+}
+
 export interface TenantClaimResult {
   readonly tenant: string;
   /** For the audit record: who the token says is calling. */
   readonly subject: string | undefined;
+  /**
+   * The scopes the token carries, from `scope` or `scp`.
+   *
+   * Read only so an admin surface can require one. `azp` and `client_id` are
+   * still discarded: a client identifier says who is asking, not what they
+   * are allowed to do, and treating one as the other is how an application
+   * id becomes a privilege.
+   */
+  readonly scopes: readonly string[];
 }
 
 type KeySource = ReturnType<typeof createRemoteJWKSet> | KeyObject | Uint8Array;
@@ -68,7 +94,16 @@ export class TenantVerifier {
   }
 
   private async loadKeys(): Promise<KeySource> {
-    if (this.source.public_key) return importSPKI(this.source.public_key, ALGORITHMS[0]);
+    if (this.source.public_key) {
+      /*
+       * The algorithm is read off the key rather than assumed. Hard-coding
+       * one here meant a pinned EC key failed to import at all, with "invalid
+       * key type" surfacing as "the token could not be verified" — a
+       * configuration error wearing the costume of a bad token, which is
+       * about the worst place to put that disguise.
+       */
+      return importSPKI(this.source.public_key, algorithmOf(this.source.public_key));
+    }
     return createRemoteJWKSet(new URL(this.source.jwks_uri!), {
       [customFetch]: async (url: string, init) => {
         const response = await this.egress.fetch(url, {
@@ -124,9 +159,32 @@ export class TenantVerifier {
 
     return {
       tenant: normalizeTenantKey(String(raw)),
-      subject: typeof payload.sub === "string" ? payload.sub : undefined
+      subject: typeof payload.sub === "string" ? payload.sub : undefined,
+      scopes: readScopes(payload)
     };
   }
+}
+
+/**
+ * Both spellings, unioned.
+ *
+ * `scope` is OAuth 2's space-delimited string; `scp` is the array several
+ * issuers use instead, and some of those send it as a string anyway. Parsed
+ * into exact tokens here so the comparison is never a substring test —
+ * `hmcp:admin-readonly` must not satisfy a requirement for `hmcp:admin`.
+ */
+function readScopes(payload: JWTPayload): readonly string[] {
+  const out = new Set<string>();
+  const add = (value: unknown): void => {
+    if (typeof value === "string") {
+      for (const part of value.split(/\s+/)) if (part) out.add(part);
+    } else if (Array.isArray(value)) {
+      for (const item of value) if (typeof item === "string" && item) out.add(item);
+    }
+  };
+  add(payload["scope"]);
+  add(payload["scp"]);
+  return [...out];
 }
 
 /** Keeps the cause in the log without turning the response into an oracle. */

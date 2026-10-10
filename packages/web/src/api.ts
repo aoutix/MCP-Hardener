@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import {
   AuditLog,
+  applyExposureChange,
   MAX_GRANT_TTL_SECONDS,
   grantMatches,
   parseExposureChange,
@@ -261,8 +262,9 @@ export function buildRoutes(options: ApiOptions): Route[] {
       if (!server.tools) {
         throw unprocessable(
           `"${server.entry.id}" is a gateway, and its tool surface is discovered by connecting to its ` +
-            "upstreams, which the console does not do. The gateway honours exposure overrides, but they " +
-            "have to be written by something that knows the tool names."
+            "upstreams, which the console deliberately does not do. The gateway honours exposure overrides; " +
+            'flip one with "hmcp-gateway exposure off <tool>", or through the gateway\'s own /admin/v1 API ' +
+            "if it is serving HTTP with an admin scope configured."
         );
       }
       const descriptor = server.tools.tools.find((t) => t.name === name);
@@ -277,58 +279,19 @@ export function buildRoutes(options: ApiOptions): Route[] {
       }
 
       const scoped = scopedFor(server);
-      const before = scoped.toolExposure(name);
-      let warning: string | null = null;
-
-      if (change.disabled) {
-        const row = scoped.disableTool(name, ctx.actor, change.reason);
-        // Switching a tool off only ever tightens, so — as with revoking a
-        // standing grant — the change is kept even if the record cannot be
-        // written, and the failure is reported rather than undoing the fix.
-        try {
-          auditFor(server, ctx.actor).appendStrict({
-            tool: name,
-            effect: descriptor.effect,
-            decision: "deny",
-            rule_id: "exposure.disable",
-            reason:
-              `${name} switched off in the console by ${ctx.actor}` +
-              (change.reason ? `: ${change.reason}` : "") +
-              "; it is no longer advertised to the model and every call to it is refused",
-            outcome: "completed",
-            args_redacted: { tool: name, effect: descriptor.effect, reason: row.reason }
-          });
-        } catch (err) {
-          warning = `${name} was switched off but the audit record failed: ${(err as Error).message}`;
-        }
-      } else {
-        const removed = scoped.enableTool(name);
-        // Nothing was switched off, so nothing changed. Writing a record here
-        // would put a permission change in the log that never happened.
-        if (removed) {
-          try {
-            auditFor(server, ctx.actor).appendStrict({
-              tool: name,
-              effect: descriptor.effect,
-              decision: "approve",
-              rule_id: "exposure.enable",
-              reason:
-                `${name} switched back on in the console by ${ctx.actor} ` +
-                `(switched off by ${removed.set_by} at ${new Date(removed.set_at).toISOString()}); ` +
-                "policy decides it again from here",
-              outcome: "completed",
-              args_redacted: { tool: name, effect: descriptor.effect }
-            });
-          } catch (err) {
-            // Unlike the other direction this one loosens, so an unauditable
-            // change is put back rather than left in place unrecorded.
-            scoped.disableTool(name, removed.set_by, removed.reason);
-            throw new Error(
-              `${name} was left switched off because switching it on could not be audited: ${(err as Error).message}`
-            );
-          }
-        }
-      }
+      /*
+       * The disable-keeps / enable-rolls-back asymmetry lives in core, because
+       * the gateway's admin API and its CLI flip the same bit and three
+       * hand-copied versions of that rule is how two of them end up wrong.
+       */
+      const { changed, warning } = applyExposureChange({
+        scoped,
+        audit: auditFor(server, ctx.actor),
+        change,
+        actor: ctx.actor,
+        effect: descriptor.effect,
+        channel: "the console"
+      });
 
       const scan = runScan(server);
       const tool = toolProtection(
@@ -338,7 +301,7 @@ export function buildRoutes(options: ApiOptions): Route[] {
         scoped.listGrants({ activeOnly: true }),
         scoped.toolExposure(name)
       );
-      return { tool, changed: (before !== undefined) !== change.disabled, warning };
+      return { tool, changed, warning };
     }),
 
     route("GET", "/api/v1/servers/:id/scan", (ctx) => {

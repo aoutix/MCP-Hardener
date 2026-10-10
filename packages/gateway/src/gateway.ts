@@ -14,7 +14,8 @@ import {
   requireTenant,
   type ElicitFn,
   type Policy,
-  type Scope
+  type Scope,
+  type ScopedApprovals
 } from "@hmcp/core";
 import { enforceCall } from "@hmcp/server-runtime";
 import { findInjection, scan, type ScanTool } from "@hmcp/scanner";
@@ -112,6 +113,7 @@ export class Gateway {
   private tenantValue: string | undefined;
   /** Shared by every per-session `Server` this gateway mints. */
   private readonly instructions: string;
+  private readonly cwd: string | undefined;
   /** The audit `component`, which is also half of every storage scope. */
   private readonly component: string;
 
@@ -119,6 +121,7 @@ export class Gateway {
     this.config = options.config;
     this.policy = options.policy;
     this.egress = new EgressGuard(options.policy.egress);
+    this.cwd = options.cwd;
     this.component = `gateway:${options.config.name}`;
     this.audit = new AuditLog({
       config: options.policy.audit,
@@ -433,6 +436,32 @@ export class Gateway {
   /** The tenant configuration this gateway runs under, for the HTTP layer. */
   get tenantConfig(): Policy["tenant"] {
     return this.policy.tenant;
+  }
+
+  /** Who may administer this gateway, if anyone. Absent means no surface. */
+  get adminConfig(): Policy["admin"] {
+    return this.policy.admin;
+  }
+
+  /** This gateway's component, for records an admin action writes. */
+  get auditComponent(): string {
+    return this.component;
+  }
+
+  /** A scoped view for one tenant, for the admin surface. */
+  scopedFor(tenant: string): ScopedApprovals {
+    return this.approvalStore.scoped(this.scopeFor(tenant));
+  }
+
+  /** An audit log for an administrative act, attributed to the actor. */
+  adminAudit(actor: string, session: string): AuditLog {
+    return new AuditLog({
+      config: this.policy.audit,
+      session,
+      component: this.component,
+      actor,
+      cwd: this.cwd
+    });
   }
 
   /** The egress guard, so a JWKS fetch goes through the same checks. */

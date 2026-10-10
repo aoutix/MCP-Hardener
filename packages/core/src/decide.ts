@@ -147,7 +147,7 @@ export function decide(input: DecideInput): Decision {
   const args = input.args ?? {};
   const effect = resolveEffect(input);
 
-  // 0. A tool switched off in the console is refused before anything else is
+  // 0. A tool switched off by an operator is refused before anything else is
   //    weighed, because nothing later can make it reachable again and a reason
   //    that names the switch is more useful than one that names a rule.
   if (input.disabled) {
@@ -155,7 +155,7 @@ export function decide(input: DecideInput): Decision {
       kind: "deny",
       effect,
       ruleId: EXPOSURE_RULE,
-      reason: input.disabledReason ?? `tool "${tool}" is switched off in the console`
+      reason: input.disabledReason ?? `tool "${tool}" is switched off`
     };
   }
 

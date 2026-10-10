@@ -7,6 +7,7 @@ import { toSarif, toText } from "@hmcp/scanner";
 import { loadGatewayConfig } from "./config.js";
 import { Gateway } from "./gateway.js";
 import { serveHttp } from "./serve-http.js";
+import { ExposureCommandError, runExposureCommand } from "./exposure-cli.js";
 
 const program = new Command();
 
@@ -150,6 +151,60 @@ program
     });
   });
 
+const exposure = program
+  .command("exposure")
+  .description("Switch one of this gateway's tools off, or hand it back to policy.");
+
+/*
+ * Commander passes `(options, command)` for a command with no argument and
+ * `(arg, options, command)` for one with. Telling them apart by position is
+ * how `list` came to read the Command object as its options; the argument's
+ * type is the thing that actually distinguishes them.
+ */
+function exposureAction(action: "list" | "off" | "on") {
+  return async (first: unknown, second?: unknown) => {
+    const tool = typeof first === "string" ? first : undefined;
+    const options = ((tool === undefined ? first : second) ?? {}) as Record<string, unknown>;
+    await run(async () => {
+      await runExposureCommand({
+        config: options["config"] as string,
+        action,
+        ...(tool !== undefined ? { tool } : {}),
+        ...(options["tenant"] !== undefined ? { tenant: options["tenant"] as string } : {}),
+        ...(options["reason"] !== undefined ? { reason: options["reason"] as string } : {}),
+        ...(options["force"] !== undefined ? { force: options["force"] as boolean } : {}),
+        ...(options["json"] !== undefined ? { json: options["json"] as boolean } : {}),
+        write: log
+      });
+    });
+  };
+}
+
+exposure
+  .command("list")
+  .description("Show which tools are switched off.")
+  .option("-c, --config <file>", "gateway config", "gateway.yaml")
+  .option("--tenant <id>", "whose switches to show")
+  .option("--json", "emit JSON", false)
+  .action(exposureAction("list"));
+
+exposure
+  .command("off <tool>")
+  .description("Withdraw a tool from the model and refuse every call to it.")
+  .option("-c, --config <file>", "gateway config", "gateway.yaml")
+  .option("--tenant <id>", "whose switch to flip")
+  .option("--reason <text>", "recorded in the audit log")
+  .option("--force", "do not connect upstreams to check the tool name", false)
+  .action(exposureAction("off"));
+
+exposure
+  .command("on <tool>")
+  .description("Clear the override and let policy decide again.")
+  .option("-c, --config <file>", "gateway config", "gateway.yaml")
+  .option("--tenant <id>", "whose switch to flip")
+  .option("--force", "do not connect upstreams to check the tool name", false)
+  .action(exposureAction("on"));
+
 program
   .command("scan")
   .description("Scan every upstream server's advertised tool surface.")
@@ -187,6 +242,10 @@ async function run(fn: () => Promise<void>): Promise<void> {
   try {
     await fn();
   } catch (err) {
+    if (err instanceof ExposureCommandError) {
+      warn(`error: ${err.message}`);
+      process.exit(1);
+    }
     if (err instanceof PolicyError || err instanceof TenantError || (err as Error)?.name === "EgressDenied") {
       warn(`\nerror: ${(err as Error).message}`);
       process.exit(1);

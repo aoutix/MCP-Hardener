@@ -30,6 +30,8 @@ import { z } from "zod";
 export interface ToolExposureRow {
   /** The audit `component` of the server this applies to. */
   readonly component: string;
+  /** Whose switch it is; "" when no tenant is configured. */
+  readonly tenant: string;
   readonly tool: string;
   readonly reason: string;
   readonly set_at: number;
@@ -48,14 +50,29 @@ CREATE TABLE IF NOT EXISTS tool_exposure (
 );
 `;
 
-/** The rule id a refusal from an exposure override is recorded under. */
+/**
+ * The rule id a *refusal* caused by an exposure override is recorded under.
+ *
+ * Distinct from the two below, which record the administrative act of
+ * flipping the switch. The string value is in the hash chain and in stored
+ * history, so it does not change.
+ */
 export const EXPOSURE_RULE = "exposure.disabled";
+
+/** The administrative act of switching a tool off. */
+export const EXPOSURE_DISABLE_RULE = "exposure.disable";
+
+/** The administrative act of handing a tool back to policy. */
+export const EXPOSURE_ENABLE_RULE = "exposure.enable";
+
+/** A caller whose token verified but carries no administrative privilege. */
+export const ADMIN_DENIED_RULE = "admin.denied";
 
 export const ExposureChangeSchema = z
   .object({
     tool: z.string().min(1),
     disabled: z.boolean(),
-    /** Free text, recorded in the audit log and shown in the console. */
+    /** Free text, recorded in the audit log and shown wherever it is reviewed. */
     reason: z.string().max(500).default("")
   })
   .strict();
@@ -69,7 +86,7 @@ export function parseExposureChange(raw: unknown): ExposureChange {
 export function exposureDeniedReason(row: ToolExposureRow): string {
   const when = new Date(row.set_at).toISOString();
   return (
-    `tool "${row.tool}" was switched off in the console by ${row.set_by} at ${when}` +
+    `tool "${row.tool}" was switched off by ${row.set_by} at ${when}` +
     (row.reason ? `: ${row.reason}` : "") +
     ". Policy was not changed; switching it back on restores whatever policy.yaml already said."
   );

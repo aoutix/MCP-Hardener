@@ -84,6 +84,34 @@ export const JwtVerifiedSourceSchema = z
   });
 export type JwtVerifiedSource = z.infer<typeof JwtVerifiedSourceSchema>;
 
+/**
+ * Who may change this deployment's configuration through an API.
+ *
+ * Deliberately its own block rather than a field on `tenant.source`.
+ * `tenant.source` answers "which customer is this", which is a tenancy
+ * question; this answers "may they flip a switch", which is an authorization
+ * one. Folding them together would also make an admin surface appear the
+ * moment anyone configured JWT tenancy, and the common case is multi-tenant
+ * hosting with no admin surface at all.
+ *
+ * One field on purpose. A list of privileged subjects here would be
+ * operational state wearing the clothes of reviewed policy.
+ */
+export const AdminConfigSchema = z
+  .object({
+    /**
+     * The scope a token must carry, compared with exact string equality.
+     *
+     * Pick one only this deployment's authorization server grants. A scope
+     * some other resource server hands out would otherwise let its tokens
+     * administer this one — `aud` is verified too, which limits the damage,
+     * but the rule should not have to lean on that.
+     */
+    scope: z.string().min(1)
+  })
+  .strict();
+export type AdminConfig = z.infer<typeof AdminConfigSchema>;
+
 export const TenantSourceSchema = z.union([
   z.object({ kind: z.literal("env"), name: z.string().min(1) }).strict(),
   z.object({ kind: z.literal("header"), name: z.string().min(1) }).strict(),
@@ -180,6 +208,7 @@ export const PolicySchema = z
     defaults: DefaultsSchema.default(() => DefaultsSchema.parse({})),
     rules: z.array(RuleSchema).default([]),
     tenant: TenantConfigSchema.optional(),
+    admin: AdminConfigSchema.optional(),
     egress: EgressConfigSchema.default(() => EgressConfigSchema.parse({})),
     approvals: ApprovalsConfigSchema.default(() => ApprovalsConfigSchema.parse({})),
     audit: AuditConfigSchema.default(() => AuditConfigSchema.parse({})),
