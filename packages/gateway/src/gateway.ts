@@ -7,6 +7,7 @@ import {
   ApprovalStore,
   AuditLog,
   EgressGuard,
+  exposureDeniedReason,
   NO_TENANT,
   requireTenant,
   type ElicitFn,
@@ -122,9 +123,19 @@ export class Gateway {
    * what is accepted, and a gateway must not quietly do either.
    */
   private installHandlers(): void {
-    this.server.setRequestHandler(ListToolsRequestSchema, async () => ({
+    this.server.setRequestHandler(ListToolsRequestSchema, async () => {
+      /*
+       * Read once per listing rather than once per tool: this is a query
+       * against a file the console may be writing to, and a list is not worth
+       * one round trip per entry. Hiding a switched-off tool is presentation
+       * only -- `dispatch` checks again and refuses whatever the advertised
+       * list happens to say, which covers the window between a toggle and the
+       * next listing.
+       */
+      const switchedOff = this.disabledTools(this.scopeFor(this.tenantValue));
+      return {
       tools: [...this.tools.values()]
-        .filter((entry) => !entry.hidden)
+        .filter((entry) => !entry.hidden && !switchedOff.has(entry.localName))
         .map((entry) => ({
           name: entry.localName,
           description: entry.description,
@@ -135,7 +146,8 @@ export class Gateway {
             destructiveHint: entry.effect === "destructive"
           }
         }))
-    }));
+      };
+    });
 
     this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const entry = this.tools.get(request.params.name);
@@ -235,6 +247,37 @@ export class Gateway {
     return { component: this.component, tenant: tenant ?? NO_TENANT };
   }
 
+  /**
+   * The console's override for one tool, or undefined.
+   *
+   * A store that cannot be read is treated as "switched off", matching the
+   * generated runtime: an override can only ever refuse, so failing closed
+   * here costs availability and never reachability.
+   */
+  private disabledTools(scope: Scope): ReadonlySet<string> {
+    try {
+      return new Set(this.approvalStore.scoped(scope).listDisabledTools().map((r) => r.tool));
+    } catch {
+      // Unreadable: advertise everything and let the per-call check refuse.
+      // Erring the other way would hide the whole surface over a transient
+      // database error.
+      return new Set();
+    }
+  }
+
+  private exposureBlock(scope: Scope, tool: string): { reason: string } | undefined {
+    try {
+      const row = this.approvalStore.scoped(scope).toolExposure(tool);
+      return row ? { reason: exposureDeniedReason(row) } : undefined;
+    } catch (err) {
+      return {
+        reason:
+          `the exposure overrides could not be read (${(err as Error).message}), ` +
+          "so this call is refused rather than assumed to be permitted"
+      };
+    }
+  }
+
   private broker(scope: Scope): ApprovalBroker {
     return new ApprovalBroker({
       config: this.policy.approvals,
@@ -249,11 +292,13 @@ export class Gateway {
     entry: GatewayTool,
     args: Record<string, unknown>
   ): Promise<{ isError?: boolean; content: { type: "text"; text: string }[] }> {
+    const scope = this.scopeFor(this.tenantValue);
+    const disabled = this.exposureBlock(scope, entry.localName);
     const outcome = await enforceCall(
       {
         policy: this.policy,
         audit: this.audit,
-        approvals: this.broker(this.scopeFor(this.tenantValue)),
+        approvals: this.broker(scope),
         tenantValue: this.tenantValue,
         actor: "agent",
         session: this.session
@@ -262,6 +307,7 @@ export class Gateway {
         tool: entry.localName,
         effect: entry.effect,
         args,
+        ...(disabled ? { disabled } : {}),
         target: `${entry.upstream.spec.name} → ${entry.tool.name}`,
         run: async () => {
           const result = await entry.upstream.callTool(entry.tool.name, args);

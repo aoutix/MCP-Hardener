@@ -317,3 +317,58 @@ describe("audit trail", () => {
     }
   });
 });
+
+describe("the console's exposure switch, over a gateway", () => {
+  /** What the console writes when someone flips the switch. */
+  function switchOff(tool: string, reason = "switched off for the test"): void {
+    const db = new ApprovalStore(join(dir, "approvals.sqlite"));
+    db.scoped(componentScope(`gateway:${config().name}`)).disableTool(tool, "reviewer", reason);
+    db.close();
+  }
+
+  it("refuses a read policy allows, without reaching the upstream", async () => {
+    const h = await harness();
+    try {
+      // Works first, so the refusal below is attributable to the switch alone.
+      expect(textOf(await h.client.callTool({ name: "notes__get_note", arguments: { id: "n1" } }))).toContain("n1");
+      const before = (await upstreamCalls(h)).length;
+
+      switchOff("notes__get_note", "incident 412");
+      const result = await h.client.callTool({ name: "notes__get_note", arguments: { id: "n1" } });
+
+      expect((result as { isError?: boolean }).isError).toBe(true);
+      expect(textOf(result)).toContain("incident 412");
+      expect(await upstreamCalls(h)).toHaveLength(before);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it("withdraws it from the advertised list as well", async () => {
+    const h = await harness();
+    try {
+      switchOff("notes__get_note");
+      const names = (await h.client.listTools()).tools.map((t) => t.name);
+      expect(names).not.toContain("notes__get_note");
+      // The rest of the surface is untouched.
+      expect(names).toContain("notes__create_note");
+    } finally {
+      await h.close();
+    }
+  });
+
+  it("records the refusal against the exposure rule rather than a policy rule", async () => {
+    const h = await harness();
+    try {
+      switchOff("notes__get_note");
+      await h.client.callTool({ name: "notes__get_note", arguments: { id: "n1" } });
+      await h.close();
+
+      const records = readAuditLog(join(dir, "audit.jsonl"));
+      const refusal = records.find((r) => r.tool === "notes__get_note" && r.decision === "deny");
+      expect(refusal?.rule_id).toBe("exposure.disabled");
+    } finally {
+      await h.close().catch(() => undefined);
+    }
+  });
+});

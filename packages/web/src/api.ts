@@ -250,12 +250,19 @@ export function buildRoutes(options: ApiOptions): Route[] {
       const server = serverById(options, ctx.params["id"]!);
       const name = ctx.params["tool"]!;
 
-      // A gateway's surface is its upstreams' and is discovered at connect
-      // time; there is no curated descriptor list here to switch a tool off in.
+      /*
+       * A gateway now honours overrides -- it reads the same rows at dispatch
+       * and withdraws a switched-off tool from its listing. What the console
+       * cannot do is name the tools: a gateway's surface is discovered by
+       * connecting to its upstreams, and registering a server here
+       * deliberately does not spawn them. So the refusal is about not knowing
+       * the tool exists, not about the override having no effect.
+       */
       if (!server.tools) {
         throw unprocessable(
-          `"${server.entry.id}" is a gateway, whose tool surface comes from its upstreams; ` +
-            "exposure overrides apply to generated servers"
+          `"${server.entry.id}" is a gateway, and its tool surface is discovered by connecting to its ` +
+            "upstreams, which the console does not do. The gateway honours exposure overrides, but they " +
+            "have to be written by something that knows the tool names."
         );
       }
       const descriptor = server.tools.tools.find((t) => t.name === name);
