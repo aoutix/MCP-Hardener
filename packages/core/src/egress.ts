@@ -76,6 +76,7 @@ export interface EgressRequestInit {
  */
 export class EgressGuard {
   private readonly agentCache = new Map<string, Agent>();
+  private readonly streamingAgentCache = new Map<string, Agent>();
 
   constructor(readonly config: EgressConfig) {}
 
@@ -201,6 +202,137 @@ export class EgressGuard {
    * manually, re-running the full check against each hop, because undici's
    * redirect interceptor would send us to a host the allowlist never saw.
    */
+  /**
+   * A guarded request whose response body is *streamed* rather than buffered.
+   *
+   * `fetch` above reads the whole body so it can cap it, which is right for a
+   * REST call and fatal for an MCP transport: a Streamable HTTP server
+   * answers with `text/event-stream` and holds it open for the life of the
+   * session, so buffering would simply never return. The gateway therefore
+   * used a plain global `fetch` for its upstreams and got none of the
+   * protections the policy file promised.
+   *
+   * This is the subset that is sound for a long-lived stream:
+   *
+   * - the synchronous pre-flight, and DNS resolution with every returned
+   *   address checked, so a name that also resolves into private space is
+   *   refused rather than filtered;
+   * - the connection pinned to those addresses, which closes the window
+   *   between checking a name and connecting to it;
+   * - a connect and headers timeout, which bound *reaching* the upstream;
+   * - redirects refused or counted here rather than followed by the fetch
+   *   implementation, so an allowlisted host cannot hand the connection to
+   *   one the allowlist never saw;
+   * - the response cap, applied as the bytes arrive.
+   *
+   * Two limits are deliberately not applied. There is no body timeout: an
+   * idle event stream is the normal state of a healthy MCP session, not a
+   * stall. And the response cap is skipped for `text/event-stream`, where the
+   * "body" is every message of a conversation rather than one payload --
+   * capping it would end a long session at an arbitrary point. Both are
+   * stated here because each is a limit a reader of `policy.yaml` could
+   * reasonably expect to apply and will not.
+   */
+  async streamingFetch(
+    rawUrl: string,
+    init: { method?: string; headers?: Record<string, string>; body?: unknown; signal?: AbortSignal } = {}
+  ): Promise<Response> {
+    const method = (init.method ?? "GET").toUpperCase();
+    let target = rawUrl;
+
+    for (let hop = 0; ; hop++) {
+      const verdict = this.check(target, method);
+      if (!verdict.ok) throw new EgressDenied(verdict.reason ?? "egress refused", verdict.code ?? "refused");
+
+      const url = new URL(target);
+      const addresses = await this.resolveVerified(url.hostname.replace(/^\[|\]$/g, ""));
+      const dispatcher = this.streamingAgentFor(addresses);
+
+      const response = await fetch(target, {
+        method,
+        ...(init.headers ? { headers: init.headers } : {}),
+        ...(init.body !== undefined && init.body !== null ? { body: init.body as RequestInit["body"] } : {}),
+        ...(init.signal ? { signal: init.signal } : {}),
+        // Never followed by the implementation: a redirect is a request to a
+        // URL the allowlist has not seen, so it comes back here to be checked.
+        redirect: "manual",
+        dispatcher
+      } as RequestInit);
+
+      const isRedirect = response.status >= 300 && response.status < 400 && response.status !== 304;
+      if (!isRedirect) return this.capped(response);
+
+      if (hop >= this.config.max_redirects) {
+        throw new EgressDenied(
+          this.config.max_redirects === 0
+            ? `upstream returned ${response.status} and egress.max_redirects is 0, so the redirect was refused`
+            : `upstream exceeded egress.max_redirects (${this.config.max_redirects})`,
+          "redirect"
+        );
+      }
+      const location = response.headers.get("location");
+      if (!location) {
+        throw new EgressDenied(`upstream returned ${response.status} without a Location header`, "redirect");
+      }
+      target = new URL(location, target).toString();
+    }
+  }
+
+  /** Counts bytes as they arrive and aborts past the cap. */
+  private capped(response: Response): Response {
+    const type = response.headers.get("content-type") ?? "";
+    if (!response.body || type.includes("text/event-stream")) return response;
+
+    const limit = this.config.max_body_bytes;
+    let seen = 0;
+    const body = response.body.pipeThrough(
+      new TransformStream<Uint8Array, Uint8Array>({
+        transform(chunk, controller) {
+          seen += chunk.byteLength;
+          if (seen > limit) {
+            controller.error(
+              new EgressDenied(
+                `response body exceeded egress.max_body_bytes (${limit}); the request was aborted`,
+                "response-too-large"
+              )
+            );
+            return;
+          }
+          controller.enqueue(chunk);
+        }
+      })
+    );
+    return new Response(body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers
+    });
+  }
+
+  /**
+   * A pinned agent for a stream.
+   *
+   * Separate from `agentFor` because that one sets `bodyTimeout`, which would
+   * tear down an event stream that is merely quiet.
+   */
+  private streamingAgentFor(addresses: { address: string; family: number }[]): Agent {
+    const key = addresses.map((a) => a.address).join(",");
+    const cached = this.streamingAgentCache.get(key);
+    if (cached) return cached;
+    const agent = new Agent({
+      connect: {
+        lookup: (_hostname, _options, callback) => {
+          callback(null, addresses as never);
+        }
+      },
+      headersTimeout: this.config.timeout_ms,
+      bodyTimeout: 0,
+      connectTimeout: this.config.timeout_ms
+    });
+    this.streamingAgentCache.set(key, agent);
+    return agent;
+  }
+
   async fetch(rawUrl: string, init: EgressRequestInit = {}): Promise<EgressResponse> {
     let method = (init.method ?? "GET").toUpperCase();
     let target = rawUrl;
@@ -323,8 +455,10 @@ export class EgressGuard {
   }
 
   async close(): Promise<void> {
-    await Promise.all([...this.agentCache.values()].map((a) => a.close().catch(() => undefined)));
+    const agents = [...this.agentCache.values(), ...this.streamingAgentCache.values()];
+    await Promise.all(agents.map((a) => a.close().catch(() => undefined)));
     this.agentCache.clear();
+    this.streamingAgentCache.clear();
   }
 }
 

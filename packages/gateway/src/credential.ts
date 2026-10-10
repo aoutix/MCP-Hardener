@@ -102,15 +102,6 @@ export function credentialFetch(
     const target = typeof url === "string" ? url : url.toString();
 
     /*
-     * Egress ran only at connect time before this, so an upstream that was
-     * allowlisted once was then free to be redirected anywhere for the life
-     * of the process. Checking here makes the allowlist a per-call control
-     * for the first time, which is nearly free given we are already in the
-     * request path.
-     */
-    egress.check(target, (init?.method ?? "POST").toUpperCase());
-
-    /*
      * Only two things are ever on an upstream request: the headers this
      * upstream was configured with, and — inside a tool call — the one header
      * carrying the caller's token. The caller's other headers are not
@@ -135,7 +126,23 @@ export function credentialFetch(
       );
     }
 
-    const response = await fetch(target, { ...init, headers });
+    /*
+     * Through the guard, not the global fetch.
+     *
+     * Egress used to run only at connect time, so an upstream allowlisted
+     * once was then free to be redirected anywhere for the rest of the
+     * process, with none of the timeouts or caps that `policy.yaml` promises.
+     * `streamingFetch` applies what can soundly be applied to a transport
+     * that holds an event stream open -- the pre-flight, DNS verification,
+     * connection pinning, a connect and headers timeout, redirect refusal,
+     * and the response cap on everything that is not itself a stream.
+     */
+    const response = await egress.streamingFetch(target, {
+      method: (init?.method ?? "POST").toUpperCase(),
+      headers: Object.fromEntries(headers.entries()),
+      ...(init?.body !== undefined && init?.body !== null ? { body: init.body } : {}),
+      ...(init?.signal ? { signal: init.signal } : {})
+    });
     if (response.status === 401 && passthrough.enabled && credential) {
       throw new UpstreamCredentialRejected(spec.name);
     }

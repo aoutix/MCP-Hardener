@@ -20,6 +20,8 @@ export interface MockHttpUpstream {
   readonly seen: Record<string, string | string[] | undefined>[];
   /** Respond 401 to the next tools/call, to exercise the rejection path. */
   reject401: boolean;
+  /** Redirect the next request here, to exercise the egress redirect rule. */
+  redirectTo: string | null;
   close(): Promise<void>;
 }
 
@@ -27,7 +29,7 @@ export async function startMockHttpUpstream(): Promise<MockHttpUpstream> {
   const auth: (string | undefined)[] = [];
   const seen: Record<string, string | string[] | undefined>[] = [];
   const sessions = new Map<string, StreamableHTTPServerTransport>();
-  const state = { reject401: false };
+  const state = { reject401: false, redirectTo: null as string | null };
 
   function build(): McpServer {
     const server = new McpServer({ name: "mock-http-upstream", version: "1.0.0" });
@@ -44,6 +46,12 @@ export async function startMockHttpUpstream(): Promise<MockHttpUpstream> {
       const header = req.headers["authorization"];
       auth.push(Array.isArray(header) ? header[0] : header);
       seen.push({ ...req.headers });
+
+      if (state.redirectTo) {
+        res.writeHead(302, { location: state.redirectTo });
+        res.end();
+        return;
+      }
 
       if (state.reject401) {
         res.writeHead(401, { "content-type": "application/json" });
@@ -81,6 +89,12 @@ export async function startMockHttpUpstream(): Promise<MockHttpUpstream> {
     },
     set reject401(v: boolean) {
       state.reject401 = v;
+    },
+    get redirectTo() {
+      return state.redirectTo;
+    },
+    set redirectTo(v: string | null) {
+      state.redirectTo = v;
     },
     close: () =>
       new Promise<void>((resolve) => {

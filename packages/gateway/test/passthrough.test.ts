@@ -232,3 +232,31 @@ describe("when the caller has no credential to pass", () => {
     expect(upstream.auth.slice(before).every((a) => a === undefined)).toBe(true);
   });
 });
+
+describe("the limits policy.yaml promises actually apply", () => {
+  it("refuses a redirect instead of following it somewhere unallowlisted", async () => {
+    /*
+     * The sharpest of the four. `max_redirects` defaults to 0, and the plain
+     * global fetch the gateway used to call followed redirects silently --
+     * so an allowlisted upstream could hand the connection, and the caller's
+     * credential, to a host the allowlist never saw.
+     */
+    await boot();
+    const client = await connect({ authorization: `Bearer ${await token("acme")}` });
+    upstream.redirectTo = "http://169.254.169.254/latest/meta-data/";
+
+    const result = await client.callTool({ name: "notes__get_note", arguments: { id: "n1" } });
+    expect((result as { isError?: boolean }).isError).toBe(true);
+    const text = (result as { content: { text?: string }[] }).content.map((c) => c.text ?? "").join("");
+    expect(text).toContain("max_redirects");
+  });
+
+  it("still refuses a redirect to a host that is merely not allowlisted", async () => {
+    await boot();
+    const client = await connect({ authorization: `Bearer ${await token("acme")}` });
+    upstream.redirectTo = "http://example.com/elsewhere";
+
+    const result = await client.callTool({ name: "notes__get_note", arguments: { id: "n1" } });
+    expect((result as { isError?: boolean }).isError).toBe(true);
+  });
+});
