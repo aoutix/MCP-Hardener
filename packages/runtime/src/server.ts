@@ -11,6 +11,7 @@ import {
   expandPath,
   exposureDeniedReason,
   parsePolicy,
+  policyDigest,
   requireTenant,
   type ElicitFn,
   type Policy
@@ -57,6 +58,12 @@ export interface HardenedServerOptions {
    * 0 disables polling, leaving the per-call check as the only trigger.
    */
   readonly exposurePollMs?: number;
+  /**
+   * Where the policy was read from, recorded so the console can name the file
+   * when what this process is enforcing has drifted from what is on disk.
+   * Absent for a policy supplied inline, which has no file to name.
+   */
+  readonly policyPath?: string;
 }
 
 /**
@@ -124,6 +131,30 @@ export class HardenedServer {
     // even once, so the first sync happens here rather than on the first call.
     this.exposurePollMs = options.exposurePollMs ?? 2000;
     this.syncExposure();
+    this.announce(options.policyPath ?? "");
+  }
+
+  /**
+   * Records which policy this process parsed, for the console to compare
+   * against what is on disk now.
+   *
+   * Best-effort on purpose: this is a claim about configuration, not a part of
+   * enforcing it, so a database that cannot be written must not stop a server
+   * from starting. The console treats a missing row as "unknown" and says so,
+   * which is the same thing a failure here produces.
+   */
+  private announce(policyPath: string): void {
+    try {
+      this.approvalStore.recordRuntimeState({
+        component: this.component,
+        pid: process.pid,
+        started_at: Date.now(),
+        policy_digest: policyDigest(this.policy),
+        policy_path: policyPath
+      });
+    } catch {
+      /* ignored: advisory only */
+    }
   }
 
   /**
@@ -143,6 +174,10 @@ export class HardenedServer {
   private syncExposure(): void {
     let disabled: ReadonlySet<string>;
     try {
+      // The same poll doubles as the liveness beat: it already runs at the
+      // right cadence and already has the database open, so a reader can tell
+      // a running server's claim from one a dead process left behind.
+      this.approvalStore.touchRuntimeState(this.component, process.pid);
       disabled = new Set(this.approvalStore.listDisabledTools(this.component).map((r) => r.tool));
     } catch {
       // The store is unreadable. Leave the advertised list alone rather than
@@ -328,7 +363,8 @@ export async function startFromFiles(options: {
     tools: parseToolsFile(toolsRaw, options.toolsPath),
     policy: parsePolicy(policyRaw, options.policyPath),
     baseUrl: options.baseUrl ?? process.env["HMCP_BASE_URL"],
-    cwd: options.cwd
+    cwd: options.cwd,
+    policyPath: options.policyPath
   });
   await server.connect();
   return server;

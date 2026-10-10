@@ -1,5 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
-import { ApprovalBroker, ApprovalStore, bindingHash, parsePolicy } from "../src/index.js";
+import {
+  ApprovalBroker,
+  ApprovalStore,
+  RUNTIME_STATE_TTL_MS,
+  bindingHash,
+  parsePolicy,
+  policyDigest,
+  runtimeStateIsLive
+} from "../src/index.js";
 
 function setup(overrides: Record<string, unknown> = {}, elicit?: Parameters<typeof makeBroker>[2]) {
   const policy = parsePolicy({ version: 1, approvals: { store_path: ":memory:", ...overrides } });
@@ -389,5 +397,100 @@ describe("exposure overrides", () => {
     expect(s.toolExposure("generated:Billing", "list_invoices")).toBeDefined();
     expect(s.toolExposure("generated:Payroll", "list_invoices")).toBeUndefined();
     expect(s.listDisabledTools("generated:Payroll")).toEqual([]);
+  });
+});
+
+describe("runtime state", () => {
+  const base = {
+    component: "generated:Billing",
+    pid: 4242,
+    started_at: 1_000,
+    policy_digest: "digest-a",
+    policy_path: "/srv/policy.yaml"
+  };
+
+  function store(): ApprovalStore {
+    return new ApprovalStore(":memory:");
+  }
+
+  it("reports nothing for a server that has never announced itself", () => {
+    expect(store().runtimeState("generated:Billing")).toBeUndefined();
+  });
+
+  it("records the digest of the policy a process actually parsed", () => {
+    const s = store();
+    s.recordRuntimeState({ ...base, last_seen: 1_000 });
+    const row = s.runtimeState("generated:Billing")!;
+    expect(row.policy_digest).toBe("digest-a");
+    expect(row.pid).toBe(4242);
+    expect(row.policy_path).toBe("/srv/policy.yaml");
+  });
+
+  it("replaces a previous run rather than accumulating rows", () => {
+    const s = store();
+    s.recordRuntimeState({ ...base, last_seen: 1_000 });
+    s.recordRuntimeState({ ...base, pid: 99, started_at: 5_000, policy_digest: "digest-b", last_seen: 5_000 });
+    const row = s.runtimeState("generated:Billing")!;
+    expect(row.pid).toBe(99);
+    expect(row.policy_digest).toBe("digest-b");
+    expect(row.started_at).toBe(5_000);
+  });
+
+  it("scopes by server, like every other row in this database", () => {
+    const s = store();
+    s.recordRuntimeState({ ...base, last_seen: 1_000 });
+    expect(s.runtimeState("generated:Payroll")).toBeUndefined();
+  });
+
+  it("keeps a live server fresh without disturbing what it reported", () => {
+    const s = store();
+    s.recordRuntimeState({ ...base, last_seen: 1_000 });
+    s.touchRuntimeState("generated:Billing", 4242, 9_000);
+    const row = s.runtimeState("generated:Billing")!;
+    expect(row.last_seen).toBe(9_000);
+    expect(row.started_at).toBe(1_000);
+    expect(row.policy_digest).toBe("digest-a");
+  });
+
+  it("ignores a beat from a process that has been superseded", () => {
+    // Otherwise a predecessor that is still winding down could keep a digest
+    // nobody is enforcing any more looking current.
+    const s = store();
+    s.recordRuntimeState({ ...base, pid: 99, last_seen: 1_000 });
+    s.touchRuntimeState("generated:Billing", 4242, 9_000);
+    expect(s.runtimeState("generated:Billing")!.last_seen).toBe(1_000);
+  });
+});
+
+describe("policy digest", () => {
+  it("is blind to formatting, so a reformatted file is not reported as a change", () => {
+    const a = parsePolicy({ version: 1, egress: { timeout_ms: 8000, allow: ["a.example.com"] } });
+    const b = parsePolicy({ egress: { allow: ["a.example.com"], timeout_ms: 8000 }, version: 1 });
+    expect(policyDigest(a)).toBe(policyDigest(b));
+  });
+
+  it("changes when something that would be enforced differently changes", () => {
+    const a = parsePolicy({ version: 1, egress: { timeout_ms: 8000 } });
+    const b = parsePolicy({ version: 1, egress: { timeout_ms: 9000 } });
+    expect(policyDigest(a)).not.toBe(policyDigest(b));
+  });
+
+  it("covers defaults, so relying on one is not mistaken for leaving it unset", () => {
+    // `timeout_ms` defaults to 10_000; writing it explicitly must agree.
+    const implicit = parsePolicy({ version: 1 });
+    const explicit = parsePolicy({ version: 1, egress: { timeout_ms: 10_000 } });
+    expect(policyDigest(implicit)).toBe(policyDigest(explicit));
+  });
+});
+
+describe("runtime state liveness", () => {
+  it("believes a row refreshed within the TTL", () => {
+    const row = { ...{ component: "c", pid: 1, started_at: 0, policy_digest: "d", policy_path: "p" }, last_seen: 10_000 };
+    expect(runtimeStateIsLive(row, 10_000 + RUNTIME_STATE_TTL_MS - 1)).toBe(true);
+  });
+
+  it("stops believing one a stopped process left behind", () => {
+    const row = { ...{ component: "c", pid: 1, started_at: 0, policy_digest: "d", policy_path: "p" }, last_seen: 10_000 };
+    expect(runtimeStateIsLive(row, 10_000 + RUNTIME_STATE_TTL_MS + 1)).toBe(false);
   });
 });

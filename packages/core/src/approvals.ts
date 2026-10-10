@@ -13,6 +13,7 @@ import {
   type StandingGrantRow
 } from "./grants.js";
 import { EXPOSURE_SCHEMA, type ToolExposureRow } from "./exposure.js";
+import { RUNTIME_STATE_SCHEMA, type RuntimeStateRow } from "./runtime-state.js";
 
 export type ApprovalState = "pending" | "granted" | "denied" | "used" | "expired";
 
@@ -78,6 +79,7 @@ export class ApprovalStore {
     // existed simply gains the table the next time it is opened.
     this.db.exec(GRANTS_SCHEMA);
     this.db.exec(EXPOSURE_SCHEMA);
+    this.db.exec(RUNTIME_STATE_SCHEMA);
   }
 
   close(): void {
@@ -377,6 +379,48 @@ export class ApprovalStore {
       .prepare("SELECT * FROM tool_exposure WHERE component = ? ORDER BY set_at DESC")
       .all(component)
       .map((r) => ({ ...r }) as unknown as ToolExposureRow);
+  }
+
+  /**
+   * Announces which policy this process is enforcing, replacing any row from a
+   * previous run of the same server.
+   *
+   * One row per component, not per process: two servers sharing a component
+   * would be two answers to a question that has one, and the last to start is
+   * the better guess. The digest is what the reader actually needs — `pid` and
+   * `started_at` are there to make a stale row legible rather than merely wrong.
+   */
+  recordRuntimeState(row: Omit<RuntimeStateRow, "last_seen"> & { last_seen?: number }): void {
+    const seen = row.last_seen ?? Date.now();
+    this.db
+      .prepare(
+        `INSERT INTO runtime_state (component, pid, started_at, last_seen, policy_digest, policy_path)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(component) DO UPDATE SET
+           pid = excluded.pid,
+           started_at = excluded.started_at,
+           last_seen = excluded.last_seen,
+           policy_digest = excluded.policy_digest,
+           policy_path = excluded.policy_path`
+      )
+      .run(row.component, row.pid, row.started_at, seen, row.policy_digest, row.policy_path);
+  }
+
+  /**
+   * Marks this server still alive, without touching what it reported.
+   *
+   * Scoped to the pid that wrote the row so a process that has been superseded
+   * cannot keep a dead predecessor's digest looking fresh.
+   */
+  touchRuntimeState(component: string, pid: number, now = Date.now()): void {
+    this.db
+      .prepare("UPDATE runtime_state SET last_seen = ? WHERE component = ? AND pid = ?")
+      .run(now, component, pid);
+  }
+
+  runtimeState(component: string): RuntimeStateRow | undefined {
+    const row = this.db.prepare("SELECT * FROM runtime_state WHERE component = ?").get(component);
+    return row ? ({ ...row } as unknown as RuntimeStateRow) : undefined;
   }
 }
 

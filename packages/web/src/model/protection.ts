@@ -3,8 +3,10 @@ import {
   decide,
   globMatch,
   grantMatches,
+  policyDigest,
   queryAuditLog,
   resolveEffect,
+  runtimeStateIsLive,
   verifyAuditLog,
   type Decision,
   type Policy,
@@ -76,7 +78,7 @@ export interface ToolProtection {
   readonly paginationCap: { param: string; max: number } | null;
   readonly schemaClosed: boolean;
   readonly review: string | null;
-  readonly source: { operationId?: string; summary?: string; deprecated?: boolean } | null;
+  readonly source: { operationId?: string; summary?: string; deprecated?: boolean; specIndex?: number } | null;
   readonly annotations: Readonly<Record<string, boolean | undefined>>;
   readonly standingGrants: readonly {
     readonly grantId: string;
@@ -159,6 +161,27 @@ export interface ServerProtection {
      * like one whose chain has been tampered with.
      */
     readonly verify: { ok: boolean; written: boolean; count: number; problemCount: number };
+  };
+  /**
+   * Whether what is shown here is what a running server is enforcing.
+   *
+   * Everything else on this object is read from disk on every request, so it
+   * is always current as to the files. A running server is not: it parsed its
+   * policy at startup and holds that copy. `applied: false` means those two
+   * have diverged and the page is describing a configuration that is not in
+   * force — the one state in which these numbers can be confidently wrong.
+   */
+  readonly runtime: {
+    /** A live server has announced itself and refreshed within the TTL. */
+    readonly running: boolean;
+    /** Epoch ms, as every other timestamp the UI formats. */
+    readonly startedAt: number | null;
+    /**
+     * `null` when nothing is running: not knowing whether the on-disk policy
+     * is in force is a different claim from knowing that it is not.
+     */
+    readonly policyApplied: boolean | null;
+    readonly policyPath: string | null;
   };
   readonly auth: { readonly kind: string; readonly envVar: string | null; readonly envPresent: boolean | null };
   readonly generation: {
@@ -385,6 +408,26 @@ export function buildProtection(server: LoadedServer): ServerProtection {
   const auth = server.tools?.auth ?? { kind: "none" as const };
   const envVar = "env" in auth ? auth.env : null;
 
+  /*
+   * Compare what a running server says it parsed against what was just read
+   * from disk. The digests are of the *parsed* policies, so reformatting or a
+   * changed comment is correctly silent and only a difference in what would be
+   * enforced shows up.
+   *
+   * A row from a process that has stopped refreshing is ignored rather than
+   * trusted: it describes a server that is no longer deciding anything, and
+   * quoting it would be a second way of saying something untrue about what is
+   * in force.
+   */
+  const announced = store.runtimeState(server.component);
+  const live = announced && runtimeStateIsLive(announced) ? announced : undefined;
+  const runtime = {
+    running: live !== undefined,
+    startedAt: live?.started_at ?? null,
+    policyApplied: live ? live.policy_digest === policyDigest(policy) : null,
+    policyPath: live?.policy_path || server.policyPath
+  };
+
   return {
     id: server.entry.id,
     label: server.entry.label,
@@ -448,6 +491,7 @@ export function buildProtection(server: LoadedServer): ServerProtection {
       redact: policy.audit.redact,
       verify: { ok: verified.ok, written, count: verified.count, problemCount: verified.problems.length }
     },
+    runtime,
     auth: {
       kind: auth.kind,
       envVar,

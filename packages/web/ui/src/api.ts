@@ -76,7 +76,9 @@ export interface ToolProtection {
   paginationCap: { param: string; max: number } | null;
   schemaClosed: boolean;
   review: string | null;
-  source: { operationId?: string; summary?: string; deprecated?: boolean } | null;
+  /** `specIndex` is absent on a tool generated before the field existed, and
+      on any surface that did not come from a spec. */
+  source: { operationId?: string; summary?: string; deprecated?: boolean; specIndex?: number } | null;
   annotations: Record<string, boolean | undefined>;
   standingGrants: {
     grantId: string;
@@ -158,6 +160,14 @@ export interface ServerProtection {
     recordArgs: boolean;
     redact: string[];
     verify: { ok: boolean; written: boolean; count: number; problemCount: number };
+  };
+  /** Whether a running server is enforcing the configuration shown here. */
+  runtime: {
+    running: boolean;
+    startedAt: number | null;
+    /** `null` when nothing is running, so "unknown" stays distinct from "no". */
+    policyApplied: boolean | null;
+    policyPath: string | null;
   };
   auth: { kind: string; envVar: string | null; envPresent: boolean | null };
   generation: {

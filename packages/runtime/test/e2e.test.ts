@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { ApprovalStore, parsePolicy, readAuditLog, verifyAuditLog } from "@hmcp/core";
+import { ApprovalStore, parsePolicy, policyDigest, readAuditLog, verifyAuditLog } from "@hmcp/core";
 import { HardenedServer, parseToolsFile, type ToolsFile } from "../src/index.js";
 
 /* -------------------------------------------------------- a stand-in REST API */
@@ -744,5 +744,54 @@ describe("the console's exposure switch", () => {
     expect(textOf(held)).toContain("Approval required");
     expect(textOf(held)).not.toContain("exposure.disabled");
     await h.close();
+  });
+});
+
+describe("telling the console which policy is in force", () => {
+  function state() {
+    const store = new ApprovalStore(join(dir, "approvals.sqlite"), dir);
+    const row = store.runtimeState("generated:Billing");
+    store.close();
+    return row;
+  }
+
+  it("announces the digest of the policy it parsed, as soon as it is constructed", async () => {
+    // Before connect(), because a console may well be reading while a server
+    // is still coming up, and an absent row there would read as "not running".
+    const h = await harness();
+    try {
+      const row = state()!;
+      expect(row.policy_digest).toBe(policyDigest(policy()));
+      expect(row.pid).toBe(process.pid);
+      expect(row.started_at).toBeGreaterThan(0);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it("announces the policy it was given, not whatever is on disk now", async () => {
+    // The whole point: this process holds a parsed copy, and a later edit to
+    // the file must not make the row agree with it.
+    const h = await harness({ policyOverrides: { egress: { allow: ["127.0.0.1"], timeout_ms: 1234 } } });
+    try {
+      expect(state()!.policy_digest).not.toBe(policyDigest(policy()));
+    } finally {
+      await h.close();
+    }
+  });
+
+  it("keeps the row fresh on the exposure poll, so a live server is not read as a dead one", async () => {
+    const h = await harness({ exposurePollMs: 10 });
+    try {
+      const before = state()!;
+      await new Promise((r) => setTimeout(r, 60));
+      const after = state()!;
+      expect(after.last_seen).toBeGreaterThan(before.last_seen);
+      // A beat is not a restart: what it reported must be untouched.
+      expect(after.started_at).toBe(before.started_at);
+      expect(after.policy_digest).toBe(policyDigest(policy()));
+    } finally {
+      await h.close();
+    }
   });
 });
