@@ -34,6 +34,11 @@ credentials.json
 /out/
 *-mcp/
 
+# `npm run demo` state: a generated server, a registry, an approvals database
+# and an audit log, all rebuilt from the examples on demand. Disposable by
+# design — the demo keeps it here precisely so it never writes into ~/.hmcp.
+/.demo/
+
 # Scratch
 /tmp/
 *.log

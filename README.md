@@ -38,6 +38,33 @@ npm test
 Node 22.5 or newer, which is where the built-in `node:sqlite` the approval store uses became
 available. There is no native dependency to compile.
 
+## Seeing all of it at once
+
+```bash
+npm run demo
+```
+
+Generates a server from `examples/billing`, registers it next to the gateway example, drives the
+generated server over stdio MCP until the approval queue and the audit log have something in them,
+then starts the console and prints the URL.
+
+The seeding goes through the real server rather than writing rows into the store, so every row on
+the Approvals page arrived through `decide()`, carries a real argument binding, and has the audit
+records to match. The build step exits non-zero on the way past — `examples/billing` is a hostile
+spec and the self-scan says so — and the demo carries on, because the files are written either way
+and the findings are the thing worth looking at.
+
+State goes in `.demo/`, which is disposable and gitignored. `~/.hmcp` is never written to: it holds
+a real registry and an audit log of real calls, and seeded fixtures do not belong in that record.
+
+```
+--reset           delete .demo/ and build it from scratch
+--port <n>        console port (default 7777)
+--pending <n>     pending approvals to top the queue up to (default 4)
+--no-seed         leave the approval queue and audit log alone
+--no-console      set the state up and stop, without serving
+```
+
 ## Generating a server
 
 ```bash

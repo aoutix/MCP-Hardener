@@ -11,6 +11,7 @@
   },
   "scripts": {
     "build": "tsc --build && npm run -w @hmcp/web build:ui",
+    "demo": "node scripts/demo.mjs",
     "clean": "tsc --build --clean && rm -rf packages/web/dist-ui",
     "test": "vitest run",
     "test:watch": "vitest",
