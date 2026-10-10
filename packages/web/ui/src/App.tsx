@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, ApiError, type ServerSummary } from "./api";
-import { Banner, Icon, Mono, Panel, ReachBadge, reachInfo, useResource } from "./components";
+import { Banner, Icon, Mono, Panel, ReachBadge, ThemeToggle, reachInfo, useResource } from "./components";
 import { Functions } from "./pages/Functions";
 import { Approvals } from "./pages/Approvals";
 import { Settings } from "./pages/Settings";
@@ -122,6 +122,7 @@ function Shell() {
             <span className="block text-[0.8125rem] font-semibold tracking-tight">hardened-mcp</span>
             <span className="block text-[0.6875rem] text-ink-soft">console</span>
           </span>
+          <ThemeToggle />
         </div>
 
         <nav className="mt-4 flex flex-col gap-0.5">
@@ -158,7 +159,9 @@ function Shell() {
           tucked behind it until it is hovered and swings forward. */}
       {/* -ml-12 is the shared seam: the card covers this strip of the rail at
           rest, and the rail covers the same strip of the card on hover. */}
-      <main className="glass stage-main relative z-10 -ml-12 flex min-w-0 flex-1 flex-col overflow-hidden rounded-[20px] shadow-[-22px_0_44px_-26px_oklch(0.2_0_0/40%),0_14px_44px_-20px_oklch(0.2_0_0/26%)]">
+      {/* The at-rest shadow is `.stage-main`'s own, in styles.css, so it themes
+          with every other shadow rather than being a literal colour here. */}
+      <main className="glass stage-main relative z-10 -ml-12 flex min-w-0 flex-1 flex-col overflow-hidden rounded-[20px]">
         <TopBar servers={list} active={active} onPick={setServerId} />
 
         <div className="flex min-h-0 flex-1 flex-col">

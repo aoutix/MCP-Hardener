@@ -15,10 +15,31 @@
   --color-subtle: oklch(0.975 0.003 265);
   --color-edge: oklch(0.922 0.004 265);
 
+  /*
+   * The four translucent fills that sit *on* the glass — a panel, a field, a
+   * button, a table header. They were literal `white/45`…`white/80` before the
+   * dark palette existed, which is exactly the kind of value that cannot be
+   * themed: on a dark pane a white scrim has to drop to a twentieth of its
+   * light-mode strength to read as the same lift. Named by the job rather than
+   * by the alpha, so there is one place per role to change.
+   */
+  --color-raise: oklch(1 0 0 / 50%);
+  --color-raise-soft: oklch(1 0 0 / 35%);
+  --color-raise-strong: oklch(1 0 0 / 60%);
+  --color-raise-hover: oklch(1 0 0 / 80%);
+
   --color-accent: oklch(0.58 0.13 158);
+  /* Accent *text* on glass. It carries the contrast against the pane, so it
+     darkens in light mode and lightens in dark — the opposite of a fill. */
   --color-accent-strong: oklch(0.42 0.11 158);
   --color-accent-soft: oklch(0.965 0.03 158);
   --color-mint: oklch(0.84 0.14 160);
+  /* `mint` is a lit fill in both themes, so what sits on it stays dark in both
+     — otherwise the primary button inverts with the theme and disappears. */
+  --color-on-mint: oklch(0.42 0.11 158);
+  /* The thrown switch's track: a *surface* a white knob has to stay legible
+     against, which is why it is not `accent-strong`. */
+  --color-switch-on: oklch(0.42 0.11 158);
 
   --color-allow: oklch(0.55 0.13 158);
   --color-approve: oklch(0.58 0.13 68);
@@ -33,10 +54,208 @@
   --color-low: oklch(0.55 0.02 265);
 }
 
+/*
+ * The glass itself, as parameters.
+ *
+ * Every blur radius and every `saturate()` in this file is a literal and stays
+ * one — the frost is the same construction in both themes. What a theme changes
+ * is only what the glass is *made of*: how much white the pane and its lit edge
+ * carry, how dark the shadow it casts is, and what the canvas behind it looks
+ * like. Dark glass is not light glass dimmed. The broad fills go *up*, because
+ * a pane has to sit lighter than a dark canvas to read as glass at all, while
+ * the rim and inset highlights come *down* by roughly a factor of four, because
+ * at light-mode strength a white rim on a dark pane reads as a drawn outline
+ * rather than as a lit edge.
+ */
+:root {
+  /* Canvas: the four radial stops in `body`, brightest first. */
+  --bg-hi: oklch(1 0 0);
+  --bg-lo-a: oklch(0.82 0 0 / 90%);
+  --bg-lo-b: oklch(0.85 0 0 / 80%);
+  --bg-mid: oklch(0.97 0 0 / 80%);
+
+  /* Shadow colour, as bare oklch components: each shadow keeps its own alpha
+     inline, so the whole depth system is one value here rather than fifteen.
+     `--cast-k` scales every one of those alphas at once. */
+  --cast: 0.2 0 0;
+  --cast-k: 1;
+
+  /* `.glass` — the rail and the content card. */
+  --pane-fill-1: oklch(1 0 0 / 3%);
+  --pane-fill-2: oklch(1 0 0 / 1.5%);
+  --pane-rim: oklch(1 0 0 / 55%);
+  --pane-lit: oklch(1 0 0 / 75%);
+  --pane-lit-under: oklch(1 0 0 / 25%);
+  --pane-rim-hi: oklch(1 0 0 / 65%);
+  --pane-lit-hi: oklch(1 0 0 / 90%);
+  --pane-lit-under-hi: oklch(1 0 0 / 40%);
+  --pane-lit-lo: oklch(1 0 0 / 60%);
+
+  /* `.glass-modal` — the same glass, thinner. */
+  --modal-fill-1: oklch(1 0 0 / 10%);
+  --modal-fill-2: oklch(1 0 0 / 7%);
+  --modal-fill-3: oklch(1 0 0 / 5%);
+  --modal-rim: oklch(1 0 0 / 60%);
+  --modal-lit: oklch(1 0 0 / 80%);
+  --modal-lit-under: oklch(1 0 0 / 28%);
+  --modal-rim-hi: oklch(1 0 0 / 78%);
+  --modal-lit-hi: oklch(1 0 0 / 95%);
+  --modal-lit-under-hi: oklch(1 0 0 / 40%);
+  --modal-rule: oklch(1 0 0 / 45%);
+  --modal-tone: contrast(0.72) brightness(1.2);
+  --scrim: oklch(0.55 0 0 / 14%);
+
+  /* `.glass-item` — the logo tile. */
+  --item-fill-1: oklch(1 0 0 / 62%);
+  --item-fill-2: oklch(1 0 0 / 34%);
+  --item-lit: oklch(1 0 0 / 80%);
+
+  /* `.nav-selected` — a green pane, so it stays part of the glass. */
+  --nav-sel-1: oklch(0.58 0.13 158 / 30%);
+  --nav-sel-2: oklch(0.58 0.13 158 / 17%);
+  --nav-sel-hover-1: oklch(0.58 0.13 158 / 42%);
+  --nav-sel-hover-2: oklch(0.58 0.13 158 / 26%);
+  --nav-sel-lit: oklch(1 0 0 / 55%);
+
+  /* `.glass-control` — the search field and the sort button. */
+  --control-fill-1: oklch(1 0 0 / 46%);
+  --control-fill-2: oklch(1 0 0 / 28%);
+  --control-rim: oklch(1 0 0 / 60%);
+  --control-lit: oklch(1 0 0 / 80%);
+  --control-lit-under: oklch(1 0 0 / 22%);
+  --control-fill-hover-1: oklch(1 0 0 / 62%);
+  --control-fill-hover-2: oklch(1 0 0 / 40%);
+  --control-rim-hover: oklch(1 0 0 / 82%);
+  --control-lit-hover: oklch(1 0 0 / 95%);
+  --control-lit-under-hover: oklch(1 0 0 / 34%);
+  --control-lit-focus: oklch(1 0 0 / 90%);
+}
+
+/*
+ * The canvas only, for the few frames before the app sets `data-theme`.
+ *
+ * The full palette below hangs off that attribute, which the app writes during
+ * module evaluation — but the stylesheet has already painted by then, so a
+ * dark-OS reader would get one white frame. These five lines are what that
+ * frame needs: the backdrop and `color-scheme`. Panes and text settle with the
+ * first render. `:not([data-theme="light"])` is what lets an explicit choice of
+ * light survive a dark OS.
+ */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --color-backdrop: oklch(0.21 0 0);
+    --bg-hi: oklch(0.36 0 0);
+    --bg-lo-a: oklch(0.12 0 0 / 90%);
+    --bg-lo-b: oklch(0.14 0 0 / 80%);
+    --bg-mid: oklch(0.3 0 0 / 80%);
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --color-ink: oklch(0.95 0.008 265);
+  --color-ink-soft: oklch(0.74 0.015 265);
+  --color-ink-faint: oklch(0.6 0.015 265);
+  --color-surface: oklch(0.26 0.008 265);
+  --color-backdrop: oklch(0.21 0 0);
+  --color-panel: oklch(0.29 0.008 265);
+  --color-subtle: oklch(0.27 0.006 265);
+  --color-edge: oklch(0.4 0.012 265);
+
+  /* A twentieth of the light-mode alphas: the same lift, read against a pane
+     that is itself dark rather than white. */
+  --color-raise: oklch(1 0 0 / 6%);
+  --color-raise-soft: oklch(1 0 0 / 3.5%);
+  --color-raise-strong: oklch(1 0 0 / 9%);
+  --color-raise-hover: oklch(1 0 0 / 14%);
+
+  --color-accent: oklch(0.72 0.14 158);
+  --color-accent-strong: oklch(0.85 0.13 158);
+  --color-accent-soft: oklch(0.32 0.045 158);
+  /* `--color-mint` and `--color-on-mint` are deliberately not overridden: a lit
+     green fill with dark text on it is correct in both themes. */
+  --color-switch-on: oklch(0.54 0.13 158);
+
+  --color-allow: oklch(0.76 0.15 158);
+  --color-approve: oklch(0.8 0.14 68);
+  --color-deny: oklch(0.72 0.17 28);
+
+  --color-read: oklch(0.8 0.015 265);
+  --color-write: oklch(0.8 0.14 68);
+  --color-destructive: oklch(0.72 0.17 28);
+
+  --color-high: oklch(0.72 0.17 28);
+  --color-medium: oklch(0.8 0.14 68);
+  --color-low: oklch(0.72 0.02 265);
+
+  /* Same structure as the light canvas — lit at the top left, falling away into
+     the two far corners — so both panes still have a luminance range to refract
+     rather than one even field. Chroma stays 0 for the reason the light canvas
+     does: a hue here would come through the glass as a tint. */
+  --bg-hi: oklch(0.36 0 0);
+  --bg-lo-a: oklch(0.12 0 0 / 90%);
+  --bg-lo-b: oklch(0.14 0 0 / 80%);
+  --bg-mid: oklch(0.3 0 0 / 80%);
+
+  /* Black rather than near-black, and deeper, since a shadow has less room to
+     separate a pane from a dark canvas than from a light one. */
+  --cast: 0 0 0;
+  --cast-k: 1.45;
+
+  --pane-fill-1: oklch(1 0 0 / 7.5%);
+  --pane-fill-2: oklch(1 0 0 / 4%);
+  --pane-rim: oklch(1 0 0 / 13%);
+  --pane-lit: oklch(1 0 0 / 20%);
+  --pane-lit-under: oklch(1 0 0 / 6%);
+  --pane-rim-hi: oklch(1 0 0 / 18%);
+  --pane-lit-hi: oklch(1 0 0 / 27%);
+  --pane-lit-under-hi: oklch(1 0 0 / 10%);
+  --pane-lit-lo: oklch(1 0 0 / 15%);
+
+  --modal-fill-1: oklch(1 0 0 / 13%);
+  --modal-fill-2: oklch(1 0 0 / 9%);
+  --modal-fill-3: oklch(1 0 0 / 7%);
+  --modal-rim: oklch(1 0 0 / 15%);
+  --modal-lit: oklch(1 0 0 / 22%);
+  --modal-lit-under: oklch(1 0 0 / 7%);
+  --modal-rim-hi: oklch(1 0 0 / 24%);
+  --modal-lit-hi: oklch(1 0 0 / 30%);
+  --modal-lit-under-hi: oklch(1 0 0 / 11%);
+  --modal-rule: oklch(1 0 0 / 11%);
+  /* Drops rather than lifts — see `.glass-modal`. */
+  --modal-tone: contrast(0.72) brightness(0.58);
+  --scrim: oklch(0 0 0 / 32%);
+
+  --item-fill-1: oklch(1 0 0 / 11%);
+  --item-fill-2: oklch(1 0 0 / 5%);
+  --item-lit: oklch(1 0 0 / 18%);
+
+  --nav-sel-1: oklch(0.72 0.14 158 / 26%);
+  --nav-sel-2: oklch(0.72 0.14 158 / 14%);
+  --nav-sel-hover-1: oklch(0.72 0.14 158 / 36%);
+  --nav-sel-hover-2: oklch(0.72 0.14 158 / 22%);
+  --nav-sel-lit: oklch(1 0 0 / 16%);
+
+  --control-fill-1: oklch(1 0 0 / 9%);
+  --control-fill-2: oklch(1 0 0 / 5%);
+  --control-rim: oklch(1 0 0 / 14%);
+  --control-lit: oklch(1 0 0 / 20%);
+  --control-lit-under: oklch(1 0 0 / 6%);
+  --control-fill-hover-1: oklch(1 0 0 / 14%);
+  --control-fill-hover-2: oklch(1 0 0 / 8%);
+  --control-rim-hover: oklch(1 0 0 / 24%);
+  --control-lit-hover: oklch(1 0 0 / 30%);
+  --control-lit-under-hover: oklch(1 0 0 / 10%);
+  --control-lit-focus: oklch(1 0 0 / 26%);
+}
+
 html, body, #root { height: 100%; }
 /*
- * Light only. Declared so form controls, scrollbars and the canvas stay light
- * even when the OS is set to dark; there is no dark palette to fall back to.
+ * Declared so form controls and scrollbars follow the console's own theme
+ * rather than the OS's — the two disagree whenever the toggle has been used.
+ * The dark blocks above re-declare it; this is the light default.
  */
 html { color-scheme: light; }
 body {
@@ -50,10 +269,10 @@ body {
    * panes have something to refract and read as glass rather than as paint.
    */
   background:
-    radial-gradient(820px 680px at 4% 2%, oklch(1 0 0), transparent 62%),
-    radial-gradient(700px 720px at 0% 100%, oklch(0.82 0 0 / 90%), transparent 64%),
-    radial-gradient(900px 820px at 100% 100%, oklch(0.85 0 0 / 80%), transparent 58%),
-    radial-gradient(760px 640px at 62% 34%, oklch(0.97 0 0 / 80%), transparent 66%),
+    radial-gradient(820px 680px at 4% 2%, var(--bg-hi), transparent 62%),
+    radial-gradient(700px 720px at 0% 100%, var(--bg-lo-a), transparent 64%),
+    radial-gradient(900px 820px at 100% 100%, var(--bg-lo-b), transparent 58%),
+    radial-gradient(760px 640px at 62% 34%, var(--bg-mid), transparent 66%),
     var(--color-backdrop);
   background-attachment: fixed;
 }
@@ -74,7 +293,7 @@ code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
        whatever is behind has to arrive as recognisable shape and colour, just
        softened. White is what prevents that, so there is very little of it
        here; the pane stays light because the backdrop behind it is light. */
-    linear-gradient(158deg, oklch(1 0 0 / 3%) 0%, oklch(1 0 0 / 1.5%) 42%, transparent 100%);
+    linear-gradient(158deg, var(--pane-fill-1) 0%, var(--pane-fill-2) 42%, transparent 100%);
   background-size: 180px 180px, auto, auto;
   /*
    * 9px. The radius is the whole difference between frosted glass and a
@@ -85,11 +304,11 @@ code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
    */
   backdrop-filter: blur(3.5px) saturate(145%);
   -webkit-backdrop-filter: blur(3.5px) saturate(145%);
-  border: 1px solid oklch(1 0 0 / 55%);
+  border: 1px solid var(--pane-rim);
   box-shadow:
-    inset 0 1px 0 oklch(1 0 0 / 75%),
-    inset 0 -1px 0 oklch(1 0 0 / 25%),
-    0 18px 44px -18px oklch(0.2 0 0 / 22%);
+    inset 0 1px 0 var(--pane-lit),
+    inset 0 -1px 0 var(--pane-lit-under),
+    0 18px 44px -18px oklch(var(--cast) / calc(22% * var(--cast-k)));
 }
 
 /*
@@ -117,13 +336,13 @@ code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
    * covers of it at rest (48px).
    */
   transform: perspective(1600px) translateX(-10px) scale(1.025) rotateY(-6deg);
-  border-color: oklch(1 0 0 / 65%);
+  border-color: var(--pane-rim-hi);
   box-shadow:
-    inset 0 1px 0 oklch(1 0 0 / 90%),
-    inset 0 -1px 0 oklch(1 0 0 / 40%),
+    inset 0 1px 0 var(--pane-lit-hi),
+    inset 0 -1px 0 var(--pane-lit-under-hi),
     /* the shadow it casts sideways onto the pane it is leaning over */
-    38px 0 60px -28px oklch(0.2 0 0 / 38%),
-    0 34px 70px -24px oklch(0.2 0 0 / 34%);
+    38px 0 60px -28px oklch(var(--cast) / calc(38% * var(--cast-k))),
+    0 34px 70px -24px oklch(var(--cast) / calc(34% * var(--cast-k)));
 }
 /*
  * The content card is the other half of the hinge. While the rail is hovered
@@ -139,6 +358,11 @@ code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
   position: relative;
   z-index: 10;
   will-change: transform;
+  /* At rest. Lives here rather than as an arbitrary Tailwind value in the
+     markup so it themes with every other shadow in the file. */
+  box-shadow:
+    -22px 0 44px -26px oklch(var(--cast) / calc(40% * var(--cast-k))),
+    0 14px 44px -20px oklch(var(--cast) / calc(26% * var(--cast-k)));
   transition:
     transform 560ms cubic-bezier(0.34, 1.28, 0.5, 1),
     box-shadow 560ms ease,
@@ -151,7 +375,7 @@ code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .rail:hover ~ .stage-main {
   transform: perspective(1400px) translateZ(-60px) rotateY(2.6deg);
   filter: brightness(0.955);
-  box-shadow: 0 8px 24px -16px oklch(0.2 0 0 / 18%);
+  box-shadow: 0 8px 24px -16px oklch(var(--cast) / calc(18% * var(--cast-k)));
   transition:
     transform 460ms cubic-bezier(0.22, 1, 0.36, 1),
     box-shadow 460ms ease,
@@ -165,8 +389,8 @@ code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
      out over the rail. */
   transform: perspective(1400px) translateZ(12px) rotateY(1.6deg);
   box-shadow:
-    -30px 0 56px -26px oklch(0.2 0 0 / 38%),
-    0 30px 64px -24px oklch(0.2 0 0 / 30%);
+    -30px 0 56px -26px oklch(var(--cast) / calc(38% * var(--cast-k))),
+    0 30px 64px -24px oklch(var(--cast) / calc(30% * var(--cast-k)));
   transition:
     transform 460ms cubic-bezier(0.22, 1, 0.36, 1),
     box-shadow 460ms ease;
@@ -176,8 +400,8 @@ code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
   transform: perspective(1600px) scale(0.978);
   filter: brightness(0.955);
   box-shadow:
-    inset 0 1px 0 oklch(1 0 0 / 60%),
-    0 10px 26px -18px oklch(0.2 0 0 / 18%);
+    inset 0 1px 0 var(--pane-lit-lo),
+    0 10px 26px -18px oklch(var(--cast) / calc(18% * var(--cast-k)));
   transition:
     transform 460ms cubic-bezier(0.22, 1, 0.36, 1),
     box-shadow 460ms ease,
@@ -200,7 +424,7 @@ code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
  * plainly out of focus but its shapes still travel through the panel.
  */
 .modal-scrim {
-  background: oklch(0.55 0 0 / 14%);
+  background: var(--scrim);
   backdrop-filter: blur(1.75px) saturate(105%);
   -webkit-backdrop-filter: blur(1.75px) saturate(105%);
 }
@@ -214,24 +438,30 @@ code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .glass-modal {
   background:
     url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.16'/%3E%3C/svg%3E"),
-    linear-gradient(158deg, oklch(1 0 0 / 10%) 0%, oklch(1 0 0 / 7%) 42%, oklch(1 0 0 / 5%) 100%);
+    linear-gradient(158deg, var(--modal-fill-1) 0%, var(--modal-fill-2) 42%, var(--modal-fill-3) 100%);
   background-size: 180px 180px, auto, auto;
   /*
    * This one floats over the function table and has to stay readable against
    * it, so the backdrop is conditioned rather than covered. `contrast` is what
    * does the work: it compresses whatever is behind the panel toward its own
-   * mid-tone, flattening the dark table text into the light field around it,
-   * and `brightness` then lifts the whole result. Together they hand the
-   * dialog's own text an even, pale ground to sit on — without the white that
-   * would turn the panel back into a card.
+   * mid-tone, flattening the table text into the field around it, and
+   * `brightness` then carries the whole result away from the dialog's own text.
+   * Together they hand that text an even ground to sit on — without the fill
+   * that would turn the panel back into a card.
+   *
+   * The pair is `--modal-tone` because it is the one part of the frost that
+   * cannot be shared between themes: its job is to push the backdrop *away*
+   * from the text in front of it, so it lifts on a light page and has to drop
+   * on a dark one. Held past that point a dark dialog fills with milky grey and
+   * stops reading as glass. The blur and the saturation are the same in both.
    */
-  backdrop-filter: blur(20px) saturate(135%) contrast(0.72) brightness(1.2);
-  -webkit-backdrop-filter: blur(20px) saturate(135%) contrast(0.72) brightness(1.2);
-  border: 1px solid oklch(1 0 0 / 60%);
+  backdrop-filter: blur(20px) saturate(135%) var(--modal-tone);
+  -webkit-backdrop-filter: blur(20px) saturate(135%) var(--modal-tone);
+  border: 1px solid var(--modal-rim);
   box-shadow:
-    inset 0 1px 0 oklch(1 0 0 / 80%),
-    inset 0 -1px 0 oklch(1 0 0 / 28%),
-    0 30px 72px -22px oklch(0.2 0 0 / 42%);
+    inset 0 1px 0 var(--modal-lit),
+    inset 0 -1px 0 var(--modal-lit-under),
+    0 30px 72px -22px oklch(var(--cast) / calc(42% * var(--cast-k)));
   /* Its own perspective, as on the nav items: the panel has to rise toward the
      viewer rather than merely grow, and the scrim's flat stack gives it no
      perspective to inherit. */
@@ -251,21 +481,21 @@ code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
  */
 .glass-modal:not(.glass-pop):hover {
   transform: perspective(1100px) translateZ(52px);
-  border-color: oklch(1 0 0 / 78%);
+  border-color: var(--modal-rim-hi);
   box-shadow:
-    inset 0 1px 0 oklch(1 0 0 / 95%),
-    inset 0 -1px 0 oklch(1 0 0 / 40%),
-    0 60px 120px -28px oklch(0.2 0 0 / 55%);
+    inset 0 1px 0 var(--modal-lit-hi),
+    inset 0 -1px 0 var(--modal-lit-under-hi),
+    0 60px 120px -28px oklch(var(--cast) / calc(55% * var(--cast-k)));
 }
 /* Inside the dialog the rules are the same glass, so they must not be the flat
    opaque edge colour, which would read as a seam on a solid card. */
-.glass-modal .modal-rule { border-color: oklch(1 0 0 / 45%); }
+.glass-modal .modal-rule { border-color: var(--modal-rule); }
 
 .glass-item {
-  background: linear-gradient(160deg, oklch(1 0 0 / 62%), oklch(1 0 0 / 34%));
+  background: linear-gradient(160deg, var(--item-fill-1), var(--item-fill-2));
   box-shadow:
-    inset 0 1px 0 oklch(1 0 0 / 80%),
-    0 2px 6px -2px oklch(0.2 0 0 / 14%);
+    inset 0 1px 0 var(--item-lit),
+    0 2px 6px -2px oklch(var(--cast) / calc(14% * var(--cast-k)));
 }
 /*
  * Selection on the rail is a green pane rather than a flat fill, so it still
@@ -273,13 +503,13 @@ code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
  * hovered selection deepens once more.
  */
 .nav-selected {
-  background: linear-gradient(160deg, oklch(0.58 0.13 158 / 30%), oklch(0.58 0.13 158 / 17%));
+  background: linear-gradient(160deg, var(--nav-sel-1), var(--nav-sel-2));
   box-shadow:
-    inset 0 1px 0 oklch(1 0 0 / 55%),
-    0 2px 6px -2px oklch(0.2 0 0 / 14%);
+    inset 0 1px 0 var(--nav-sel-lit),
+    0 2px 6px -2px oklch(var(--cast) / calc(14% * var(--cast-k)));
 }
 .nav-selected:hover {
-  background: linear-gradient(160deg, oklch(0.58 0.13 158 / 42%), oklch(0.58 0.13 158 / 26%));
+  background: linear-gradient(160deg, var(--nav-sel-hover-1), var(--nav-sel-hover-2));
 }
 
 .nav-item {
@@ -294,9 +524,70 @@ code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
    growing — the rail's perspective does not reach it through the flat layers. */
 .nav-item:hover {
   transform: perspective(600px) translateZ(26px);
-  box-shadow: 0 10px 22px -12px oklch(0.2 0 0 / 35%);
+  box-shadow: 0 10px 22px -12px oklch(var(--cast) / calc(35% * var(--cast-k)));
 }
 .nav-item:active { transform: perspective(600px) translateZ(8px); }
+
+/*
+ * A control cut from the same glass as the panes — the Approvals search field
+ * and the sort button. Same construction as `.glass`, scaled down: the grain,
+ * a thin white gradient and a lit top edge, over a real `backdrop-filter` so
+ * the page behind it arrives softened rather than covered. There is slightly
+ * more white here than in `.glass` because a control is small and has to hold
+ * its own shape against a table, and the blur is tighter for the same reason.
+ */
+.glass-control {
+  background:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.14'/%3E%3C/svg%3E"),
+    linear-gradient(158deg, var(--control-fill-1) 0%, var(--control-fill-2) 100%);
+  background-size: 180px 180px, auto;
+  backdrop-filter: blur(6px) saturate(150%);
+  -webkit-backdrop-filter: blur(6px) saturate(150%);
+  border: 1px solid var(--control-rim);
+  box-shadow:
+    inset 0 1px 0 var(--control-lit),
+    inset 0 -1px 0 var(--control-lit-under),
+    0 2px 8px -4px oklch(var(--cast) / calc(18% * var(--cast-k)));
+  /* Its own perspective, as on the nav items: the flat layers above these
+     controls hand down none of their own, so without this the lift reads as
+     the control merely getting bigger. */
+  transform-origin: center;
+  will-change: transform;
+  transition:
+    transform 260ms cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 260ms ease,
+    border-color 260ms ease,
+    background 260ms ease;
+}
+/*
+ * Hover pops it out: it rises toward the viewer, the lit edge brightens and the
+ * cast shadow spreads and softens under it. The same gesture the rail and the
+ * nav items make, at the travel a control's size can carry.
+ */
+.glass-control:hover {
+  transform: perspective(600px) translateZ(18px);
+  border-color: var(--control-rim-hover);
+  background:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.14'/%3E%3C/svg%3E"),
+    linear-gradient(158deg, var(--control-fill-hover-1) 0%, var(--control-fill-hover-2) 100%);
+  background-size: 180px 180px, auto;
+  box-shadow:
+    inset 0 1px 0 var(--control-lit-hover),
+    inset 0 -1px 0 var(--control-lit-under-hover),
+    0 16px 30px -14px oklch(var(--cast) / calc(38% * var(--cast-k)));
+}
+.glass-control:active { transform: perspective(600px) translateZ(6px); }
+/* Typing is not hovering: while the field has the caret it stays put and shows
+   the accent instead, so the text does not sit on a moving surface. */
+.glass-control:focus-within:not(:hover) { transform: none; }
+.glass-control:focus-within {
+  /* The accent token, so the caret ring lifts with the palette in dark. */
+  border-color: color-mix(in oklch, var(--color-accent) 70%, transparent);
+  box-shadow:
+    inset 0 1px 0 var(--control-lit-focus),
+    0 0 0 3px color-mix(in oklch, var(--color-accent) 15%, transparent),
+    0 10px 24px -14px oklch(var(--cast) / calc(30% * var(--cast-k)));
+}
 
 /*
  * The exposure switch. The knob travels on a transform rather than on a flex
@@ -321,13 +612,13 @@ code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
  */
 .switch-bloom-on { animation: switch-bloom-on 560ms ease-out; }
 @keyframes switch-bloom-on {
-  from { box-shadow: 0 0 0 0 oklch(0.42 0.11 158 / 50%); }
-  to   { box-shadow: 0 0 0 9px oklch(0.42 0.11 158 / 0%); }
+  from { box-shadow: 0 0 0 0 color-mix(in oklch, var(--color-switch-on) 50%, transparent); }
+  to   { box-shadow: 0 0 0 9px color-mix(in oklch, var(--color-switch-on) 0%, transparent); }
 }
 .switch-bloom-off { animation: switch-bloom-off 560ms ease-out; }
 @keyframes switch-bloom-off {
-  from { box-shadow: 0 0 0 0 oklch(0.55 0.02 265 / 42%); }
-  to   { box-shadow: 0 0 0 9px oklch(0.55 0.02 265 / 0%); }
+  from { box-shadow: 0 0 0 0 color-mix(in oklch, var(--color-ink-soft) 42%, transparent); }
+  to   { box-shadow: 0 0 0 9px color-mix(in oklch, var(--color-ink-soft) 0%, transparent); }
 }
 
 /*
@@ -338,13 +629,13 @@ code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
  */
 .row-flash-on { animation: row-flash-on 820ms ease-out; }
 @keyframes row-flash-on {
-  from { box-shadow: inset 0 0 0 9999px oklch(0.58 0.13 158 / 20%); }
-  to   { box-shadow: inset 0 0 0 9999px oklch(0.58 0.13 158 / 0%); }
+  from { box-shadow: inset 0 0 0 9999px color-mix(in oklch, var(--color-accent) 20%, transparent); }
+  to   { box-shadow: inset 0 0 0 9999px color-mix(in oklch, var(--color-accent) 0%, transparent); }
 }
 .row-flash-off { animation: row-flash-off 820ms ease-out; }
 @keyframes row-flash-off {
-  from { box-shadow: inset 0 0 0 9999px oklch(0.55 0.02 265 / 18%); }
-  to   { box-shadow: inset 0 0 0 9999px oklch(0.55 0.02 265 / 0%); }
+  from { box-shadow: inset 0 0 0 9999px color-mix(in oklch, var(--color-ink-soft) 18%, transparent); }
+  to   { box-shadow: inset 0 0 0 9999px color-mix(in oklch, var(--color-ink-soft) 0%, transparent); }
 }
 
 /*
@@ -356,8 +647,9 @@ code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
  */
 
 @media (prefers-reduced-motion: reduce) {
-  .glass, .rail, .nav-item, .stage-main, .glass-modal { transition: none; }
+  .glass, .rail, .nav-item, .stage-main, .glass-modal, .glass-control { transition: none; }
   .switch-track, .switch-knob { transition: none; }
+  .glass-control:hover, .glass-control:active { transform: none; }
   .switch-bloom-on,
   .switch-bloom-off,
   .row-flash-on,

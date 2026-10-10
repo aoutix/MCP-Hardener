@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { Reach } from "./api";
+import { useTheme } from "./theme";
 
 /* -------------------------------------------------------------------- icons */
 
@@ -122,6 +123,8 @@ const PATHS: Record<string, React.ReactNode> = {
     </>
   ),
   sort: <path d="M4 7h10M4 12h7M4 17h4M17 5v14M17 19l3-3M17 19l-3-3" />,
+  "arrow-down": <path d="M12 5v14M12 19l5-5M12 19l-5-5" />,
+  "arrow-up": <path d="M12 19V5M12 5l5 5M12 5 7 10" />,
   collapse: (
     <>
       <rect x="3" y="4" width="18" height="16" rx="2" />
@@ -143,7 +146,16 @@ const PATHS: Record<string, React.ReactNode> = {
     </>
   ),
   close: <path d="M6 6l12 12M18 6 6 18" />,
-  spinner: <path d="M12 3a9 9 0 1 0 9 9" />
+  spinner: <path d="M12 3a9 9 0 1 0 9 9" />,
+  sun: (
+    <>
+      <circle cx="12" cy="12" r="4.2" />
+      <path d="M12 2.6v2.1M12 19.3v2.1M4.4 4.4l1.5 1.5M18.1 18.1l1.5 1.5M2.6 12h2.1M19.3 12h2.1M4.4 19.6l1.5-1.5M18.1 5.9l1.5-1.5" />
+    </>
+  ),
+  /* A waning crescent rather than a filled disc: at 15px a stroked outline is
+     the only form that still reads as a moon next to the sun's rays. */
+  moon: <path d="M20.2 14.4A8.4 8.4 0 0 1 9.6 3.8a8.4 8.4 0 1 0 10.6 10.6z" />
 };
 
 export function Icon({
@@ -472,7 +484,7 @@ export function Panel({
   actions?: React.ReactNode;
 }) {
   return (
-    <section className="rounded-xl border border-edge bg-white/50">
+    <section className="rounded-xl border border-edge bg-raise">
       {title && (
         <header className="flex items-start justify-between gap-4 border-b border-edge px-4 py-3">
           <div>
@@ -514,8 +526,8 @@ export function Button({
   type?: "button" | "submit";
 }) {
   const tones = {
-    neutral: "border-edge bg-white/60 shadow-xs hover:bg-white/80",
-    primary: "border-transparent bg-mint text-accent-strong shadow-xs hover:brightness-95",
+    neutral: "border-edge bg-raise-strong shadow-xs hover:bg-raise-hover",
+    primary: "border-transparent bg-mint text-on-mint shadow-xs hover:brightness-95",
     approve: "border-allow/50 text-allow hover:bg-allow/10",
     deny: "border-deny/50 text-deny hover:bg-deny/10"
   };
@@ -533,6 +545,64 @@ export function Button({
 
 export function Empty({ children }: { children: React.ReactNode }) {
   return <p className="py-6 text-center text-sm text-ink-soft">{children}</p>;
+}
+
+/**
+ * Hover text that actually appears.
+ *
+ * The native `title` attribute needs a second of stillness, draws in OS chrome
+ * and on some setups never shows at all, which makes it useless for explaining
+ * a control. This draws the bubble itself: shown on hover and on keyboard focus,
+ * positioned from the trigger's rect and rendered through a portal with
+ * `position: fixed`, so a scrolling ancestor cannot clip it. It closes on scroll
+ * rather than following the trigger, which is cheaper than tracking and reads
+ * the same at this size.
+ */
+export function Hint({ label, children }: { label: string; children: React.ReactNode }) {
+  const ref = useRef<HTMLSpanElement>(null);
+  const [at, setAt] = useState<{ top: number; left: number } | null>(null);
+
+  function show() {
+    const box = ref.current?.getBoundingClientRect();
+    if (box) setAt({ top: box.bottom + 8, left: box.left + box.width / 2 });
+  }
+  const hide = () => setAt(null);
+
+  useEffect(() => {
+    if (!at) return;
+    window.addEventListener("scroll", hide, true);
+    window.addEventListener("resize", hide);
+    return () => {
+      window.removeEventListener("scroll", hide, true);
+      window.removeEventListener("resize", hide);
+    };
+  }, [at]);
+
+  return (
+    <span
+      ref={ref}
+      className="contents"
+      onMouseEnter={show}
+      onMouseLeave={hide}
+      onFocus={show}
+      onBlur={hide}
+      /* A tap should not leave the bubble stranded on a touch screen. */
+      onTouchStart={hide}
+    >
+      {children}
+      {at &&
+        createPortal(
+          <span
+            role="tooltip"
+            style={{ top: at.top, left: at.left }}
+            className="pointer-events-none fixed z-50 max-w-72 -translate-x-1/2 rounded-lg bg-ink px-2.5 py-1.5 text-xs leading-snug text-surface shadow-lg"
+          >
+            {label}
+          </span>,
+          document.body
+        )}
+    </span>
+  );
 }
 
 export function Banner({ tone, children }: { tone: "ok" | "warn" | "bad"; children: React.ReactNode }) {
@@ -597,7 +667,7 @@ export function Modal({
           <button
             onClick={onClose}
             aria-label="Close"
-            className="rounded-md p-1 text-ink-faint transition hover:bg-white/60 hover:text-ink"
+            className="rounded-md p-1 text-ink-faint transition hover:bg-raise-strong hover:text-ink"
           >
             <Icon name="close" size={15} />
           </button>
@@ -639,6 +709,29 @@ export function useDismissed(key: string): { dismissed: boolean; dismiss: () => 
       setDismissed(true);
     }
   };
+}
+
+/**
+ * The light/dark control, in the rail's header.
+ *
+ * Shows the theme it would switch *to* rather than the one in force: the pane
+ * around it already says which that is, so drawing the current state would make
+ * the button the one thing on screen that has to be read twice.
+ */
+export function ThemeToggle() {
+  const { theme, toggle, following } = useTheme();
+  const next = theme === "dark" ? "light" : "dark";
+  return (
+    <button
+      type="button"
+      onClick={toggle}
+      aria-label={`Switch to ${next} mode${following ? " (currently following the system)" : ""}`}
+      title={`Switch to ${next} mode`}
+      className="nav-item glass-item ml-auto flex h-8 w-8 items-center justify-center rounded-[10px] text-ink-soft hover:text-ink"
+    >
+      <Icon name={next === "dark" ? "moon" : "sun"} size={15} />
+    </button>
+  );
 }
 
 /* ---------------------------------------------------------------- redaction */
@@ -722,7 +815,7 @@ export function RedactedArgs({ args, error }: { args: unknown; error?: string | 
     return <p className="text-xs text-ink-soft">no arguments</p>;
   }
   return (
-    <div className="rounded border border-edge bg-white/45 px-2 py-1.5">
+    <div className="rounded border border-edge bg-raise px-2 py-1.5">
       <RedactedValue value={args} />
     </div>
   );
