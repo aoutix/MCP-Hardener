@@ -1,8 +1,25 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { createReadStream, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, extname, join, normalize, resolve, sep } from "node:path";
-import { expandPath } from "@hmcp/core";
+import {
+  HttpError,
+  MAX_BODY_BYTES,
+  badRequest,
+  constantTimeEquals,
+  expandPath,
+  readBody,
+  conflict,
+  notFound,
+  unprocessable
+} from "@hmcp/core";
+
+/*
+ * Re-exported so the console's own modules keep importing them from here.
+ * They live in core because the gateway needs them too and must not depend
+ * on the console.
+ */
+export { HttpError, MAX_BODY_BYTES, badRequest, conflict, notFound, unprocessable };
 
 /**
  * The console's HTTP layer.
@@ -13,24 +30,6 @@ import { expandPath } from "@hmcp/core";
  * double-submit token on everything that mutates.
  */
 
-export const MAX_BODY_BYTES = 256 * 1024;
-
-export class HttpError extends Error {
-  constructor(
-    readonly status: number,
-    readonly code: string,
-    message: string,
-    readonly detail?: unknown
-  ) {
-    super(message);
-    this.name = "HttpError";
-  }
-}
-
-export const badRequest = (m: string, d?: unknown) => new HttpError(400, "bad-request", m, d);
-export const notFound = (m: string) => new HttpError(404, "not-found", m);
-export const conflict = (m: string) => new HttpError(409, "conflict", m);
-export const unprocessable = (m: string, d?: unknown) => new HttpError(422, "unprocessable", m, d);
 
 export interface RequestContext {
   readonly method: string;
@@ -100,12 +99,6 @@ export function loadOrCreateToken(path = expandPath("~/.hmcp/web-token")): strin
   return token;
 }
 
-function constantTimeEquals(a: string, b: string): boolean {
-  const left = Buffer.from(a);
-  const right = Buffer.from(b);
-  if (left.length !== right.length) return false;
-  return timingSafeEqual(left, right);
-}
 
 /* -------------------------------------------------------------------- static */
 
@@ -300,21 +293,6 @@ function parseCookies(header: string | undefined): Record<string, string> {
   return out;
 }
 
-async function readBody(req: IncomingMessage): Promise<unknown> {
-  const chunks: Buffer[] = [];
-  let size = 0;
-  for await (const chunk of req) {
-    size += (chunk as Buffer).length;
-    if (size > MAX_BODY_BYTES) throw badRequest(`request body exceeds ${MAX_BODY_BYTES} bytes`);
-    chunks.push(chunk as Buffer);
-  }
-  if (size === 0) return undefined;
-  try {
-    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
-  } catch {
-    throw badRequest("request body is not valid JSON");
-  }
-}
 
 function serveStatic(req: IncomingMessage, res: ServerResponse, uiDir: string): void {
   if (req.method !== "GET" && req.method !== "HEAD") {
