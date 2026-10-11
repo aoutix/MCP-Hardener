@@ -1055,9 +1055,6 @@ function ConfigurationTab({
   const exposure = verdictOf(tool);
   const permission = permissionOf(tool.effect);
   const audit = server?.audit;
-  /* Whether anything actually bounds this tool's arguments, which is the
-     question the schema's own looseness only gestures at. */
-  const hasBounds = tool.args.some((a) => a.constrainedByRule !== null);
 
   return (
     <div className="space-y-5">
@@ -1230,18 +1227,24 @@ function ConfigurationTab({
       <Section
         icon="braces"
         title="Input validation"
+        /*
+         * Only where the upstream made a claim. The badge sits against the
+         * heading "Input validation", so "Not declared" there reads as "this
+         * tool declares no input validation" — which is false of a tool whose
+         * arguments are listed directly beneath it. What is undeclared is
+         * `additionalProperties`, and the schema block below says so in the
+         * one place that cannot be misread as being about something else.
+         */
         aside={
-          <span
-            className={`rounded-md px-2 py-0.5 text-xs font-medium ${
-              tool.schemaClosed === true
-                ? "bg-accent-soft text-accent-strong"
-                : tool.schemaClosed === false
-                  ? "bg-write/10 text-write"
-                  : "bg-subtle text-ink-soft"
-            }`}
-          >
-            {tool.schemaClosed === true ? "Strict" : tool.schemaClosed === false ? "Open" : "Not declared"}
-          </span>
+          tool.schemaClosed === null ? undefined : (
+            <span
+              className={`rounded-md px-2 py-0.5 text-xs font-medium ${
+                tool.schemaClosed ? "bg-accent-soft text-accent-strong" : "bg-write/10 text-write"
+              }`}
+            >
+              {tool.schemaClosed ? "Strict" : "Open"}
+            </span>
+          )
         }
       >
         <div className="rounded-lg border border-edge bg-raise px-3 py-2.5">
@@ -1261,44 +1264,29 @@ function ConfigurationTab({
           </p>
         </div>
         {/*
-         * Three statements, because the schema makes three different claims
-         * and only one of them is a finding. Absent is what almost every MCP
-         * server emits, so reading it as "open" put the same warning on every
-         * tool — and a warning that is always on says nothing. The scanner has
-         * only ever flagged an explicit `true`; this now matches it.
+         * Only the two states that say something. `additionalProperties`
+         * absent is what almost every MCP server emits, and a line of prose on
+         * every tool of every gateway is not a finding — the badge already
+         * says it was not declared, and the argument table above already
+         * marks which arguments a policy rule bounds.
          */}
-        <p className="mt-2 flex items-start gap-1.5 text-xs text-ink-soft">
-          <Icon
-            name={tool.schemaClosed === false ? "alert" : tool.schemaClosed === true ? "check" : "info"}
-            size={13}
-            className={`mt-0.5 ${
-              tool.schemaClosed === false ? "text-write" : tool.schemaClosed === true ? "text-accent" : "text-ink-faint"
-            }`}
-          />
-          {tool.schemaClosed === true ? (
-            <>The upstream declared this object closed, so an argument it does not name is rejected.</>
-          ) : tool.schemaClosed === false ? (
-            <>
-              The upstream declared this object <Mono>additionalProperties: true</Mono>, so it accepts arguments the
-              schema never named and the gateway forwards them as given.
-            </>
-          ) : (
-            <>
-              The upstream did not say whether undeclared arguments are accepted, which is what most MCP servers
-              emit. The gateway does not validate arguments against this schema either way —{" "}
-              {hasBounds ? (
-                <>
-                  what bounds them here is the policy rule marked on each argument above.
-                </>
-              ) : (
-                <>
-                  what would bound them is an <Mono>args</Mono> constraint on a policy rule, and no rule constrains
-                  this tool&rsquo;s arguments today.
-                </>
-              )}
-            </>
-          )}
-        </p>
+        {tool.schemaClosed !== null && (
+          <p className="mt-2 flex items-start gap-1.5 text-xs text-ink-soft">
+            <Icon
+              name={tool.schemaClosed ? "check" : "alert"}
+              size={13}
+              className={`mt-0.5 ${tool.schemaClosed ? "text-accent" : "text-write"}`}
+            />
+            {tool.schemaClosed ? (
+              <>The upstream declared this object closed, so an argument it does not name is rejected.</>
+            ) : (
+              <>
+                The upstream declared this object <Mono>additionalProperties: true</Mono>, so it accepts arguments
+                the schema never named and the gateway forwards them as given.
+              </>
+            )}
+          </p>
+        )}
       </Section>
 
       {/*
