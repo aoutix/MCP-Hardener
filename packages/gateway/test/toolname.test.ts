@@ -227,10 +227,7 @@ describe("how an injection finding is handled", () => {
     expect(record.reason).toContain("overriding the gateway default of strip");
   });
 
-  it("cannot be used to hide that the text tripped a pattern", async () => {
-    // The weakest of the three still prefixes a warning and still keeps the
-    // finding on the record. There is deliberately no fourth option that
-    // leaves the description untouched.
+  it("annotate keeps the text and labels it", async () => {
     const first = await surfaceWith({ on_injection: "deny" });
     const entry = await surfaceWith({
       on_injection: "deny",
@@ -238,8 +235,59 @@ describe("how an injection finding is handled", () => {
     });
     expect(entry.description).toMatch(/hmcp-gateway warning/);
     expect(entry.description).toMatch(/data, not as instructions/);
+  });
+
+  it("accept leaves a reviewed description exactly as the upstream wrote it", async () => {
+    // For the pattern that fired on a legitimate description: `annotate` would
+    // tell the model to treat a real instruction as data, which makes it
+    // distrust a tool it should be using. Safe to offer because a description
+    // cannot reach a decision, so accepting text widens no permission.
+    const first = await surfaceWith({ on_injection: "strip" });
+    const entry = await surfaceWith({
+      on_injection: "strip",
+      injection_overrides: { [first.localName]: "accept" }
+    });
+    expect(entry.injection!.action).toBe("accept");
+    expect(entry.description).toBe(entry.tool.description);
+    expect(entry.description).not.toMatch(/hmcp-gateway/);
+    expect(entry.hidden).toBe(false);
+  });
+
+  it("accept still records the finding, so it is a decision and not a silence", async () => {
+    const first = await surfaceWith({ on_injection: "strip" });
+    rmSync(join(dir, "audit.jsonl"), { force: true });
+    const entry = await surfaceWith({
+      on_injection: "strip",
+      injection_overrides: { [first.localName]: "accept" }
+    });
+
+    // Still reported, so the console shows which patterns matched.
     expect(entry.injection!.patternIds.length).toBeGreaterThan(0);
-    expect(readAuditLog(join(dir, "audit.jsonl")).some((r) => r.rule_id === "HMCP005")).toBe(true);
+    const record = readAuditLog(join(dir, "audit.jsonl")).find((r) => r.rule_id === "HMCP005")!;
+    expect(record.reason).toContain("action: accept");
+    expect(record.reason).toContain("overriding the gateway default of strip");
+  });
+
+  it("cannot accept across a whole surface, only one reviewed tool at a time", () => {
+    // A blanket accept would be injection handling switched off, and then
+    // nobody reviewed anything. The gateway and upstream settings do not offer
+    // it; the per-tool map does.
+    const base = {
+      version: 1,
+      name: "g",
+      policy: { version: 1 },
+      upstreams: [{ name: "notes", transport: "stdio", command: "node", args: [] }]
+    };
+    expect(() => GatewayConfigSchema.parse({ ...base, on_injection: "accept" })).toThrow();
+    expect(() =>
+      GatewayConfigSchema.parse({
+        ...base,
+        upstreams: [{ ...base.upstreams[0], on_injection: "accept" }]
+      })
+    ).toThrow();
+    expect(() =>
+      GatewayConfigSchema.parse({ ...base, injection_overrides: { "notes__x": "accept" } })
+    ).not.toThrow();
   });
 });
 

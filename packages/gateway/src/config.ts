@@ -113,11 +113,21 @@ export const GatewayConfigSchema = z
      * diff, which is the point: a decision to treat a specific finding on a
      * specific tool as noise should be as visible as any other policy edit.
      *
-     * Note what is *not* here: an option to leave the text untouched. The
-     * weakest of the three still prefixes a warning, so an override can
-     * restore a description but never hide that it tripped a pattern.
+     * `accept` is available here and *only* here — not as the gateway default
+     * and not per upstream. It keeps the upstream's text exactly as written,
+     * which is the honest answer for a pattern that fired on a legitimate
+     * description: `annotate` would tell the model to treat a real instruction
+     * as data, which makes it distrust a tool it should be using.
+     *
+     * It is safe to offer because a description cannot reach a decision —
+     * nothing in `decide()` or `classify()` reads one — so accepting text
+     * widens no permission. What it must never do is make the finding
+     * disappear, and it does not: the audit record is written either way and
+     * the console still shows which patterns matched. The reason it is
+     * per-tool only is that a blanket `accept` would simply be injection
+     * handling switched off, and then nobody reviewed anything.
      */
-    injection_overrides: z.record(z.string(), z.enum(["strip", "deny", "annotate"])).default({}),
+    injection_overrides: z.record(z.string(), z.enum(["strip", "deny", "annotate", "accept"])).default({}),
     /** Prefix upstream tool names with `<server>__`. */
     namespace: z.boolean().default(true)
   })

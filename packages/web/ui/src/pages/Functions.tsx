@@ -117,6 +117,19 @@ function permissionOf(effect: string | null): { label: string; className: string
   return PERMISSION[effect] ?? { label: effect, className: "text-ink-soft" };
 }
 
+/**
+ * Whether the text the model is given is still the upstream's own.
+ *
+ * `strip` and `annotate` both change it and `deny` hides the tool, so an
+ * injection finding with the text unchanged means a human reviewed that finding
+ * on that tool and accepted it. Derived rather than carried, because the two
+ * descriptions are already here and a second source for the same fact is a
+ * second thing to keep in step.
+ */
+function injectionAccepted(tool: ToolProtection): boolean {
+  return tool.injection !== null && !tool.hiddenByPolicy && tool.description === tool.rawDescription;
+}
+
 /** How the gateway decided an effect, in words rather than an enum. */
 const EFFECT_SOURCE: Record<string, string> = {
   policy: "a policy rule names this tool",
@@ -844,7 +857,13 @@ function FunctionRow({
             className={tool.injection || warn ? "" : "text-ink-faint"}
           />
           <span className="truncate">
-            {tool.injection ? "description rewritten" : tool.hiddenByPolicy ? "withheld" : tool.upstream}
+            {tool.hiddenByPolicy
+              ? "withheld"
+              : injectionAccepted(tool)
+                ? "pattern accepted"
+                : tool.injection
+                  ? "description rewritten"
+                  : tool.upstream}
           </span>
         </span>
         <span className={`mono mt-0.5 block truncate text-xs ${warn ? "text-write" : "text-ink-faint"}`}>
@@ -1063,7 +1082,7 @@ function ConfigurationTab({
           it to make it reachable.
         </Banner>
       )}
-      {tool.injection && (
+      {tool.injection && !injectionAccepted(tool) && (
         <Banner tone="warn">
           <strong>Its upstream description carried injected instructions.</strong> The gateway matched{" "}
           {tool.injection.map((id) => (
@@ -1071,6 +1090,17 @@ function ConfigurationTab({
           ))}{" "}
           in the text this upstream advertised{tool.hiddenByPolicy ? " and withheld the tool entirely" : ""}. What
           the model is told is shown above; what the upstream actually said is on the Schema tab.
+        </Banner>
+      )}
+      {injectionAccepted(tool) && (
+        <Banner tone="info">
+          <strong>A pattern matched here and was accepted after review.</strong> The gateway matched{" "}
+          {tool.injection!.map((id) => (
+            <Mono key={id}>{id}</Mono>
+          ))}{" "}
+          in this upstream&rsquo;s description, and an <Mono>injection_overrides</Mono> entry in the gateway config
+          says to pass the text through unchanged — so what the model is told above is the upstream&rsquo;s own
+          wording. Accepting a finding changes no permission: a description never reaches a verdict.
         </Banner>
       )}
       {tool.unreachable && !tool.exposure.disabled && (

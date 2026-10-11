@@ -35,7 +35,10 @@ export interface GatewayTool {
   readonly effectSource: ReturnType<typeof classify>["source"];
   readonly description: string;
   /** Injection findings in the upstream's own text, and what we did about them. */
-  readonly injection: { readonly patternIds: readonly string[]; readonly action: "strip" | "deny" | "annotate" } | null;
+  readonly injection: {
+    readonly patternIds: readonly string[];
+    readonly action: "strip" | "deny" | "annotate" | "accept";
+  } | null;
   readonly hidden: boolean;
 }
 
@@ -431,6 +434,15 @@ export class Gateway {
         case "deny":
           hidden = true;
           break;
+        case "accept":
+          /*
+           * The text is left exactly as the upstream wrote it. Reachable only
+           * through a per-tool override, so someone has looked at this finding
+           * on this tool and said it is noise. The finding is still recorded
+           * below and still shown in the console, so accepting it is a
+           * decision on the record rather than a silence.
+           */
+          break;
         case "strip":
           // The text is replaced rather than edited: a partial clean-up leaves
           // an attacker room to work in whatever survived.
@@ -486,8 +498,15 @@ export class Gateway {
    * the text the model needs and gets misused rather than failing. Without a
    * narrower lever the only fix was to weaken the setting for every upstream
    * at once, which is the wrong trade to be forced into.
+   *
+   * `accept` can only arrive from the per-tool map; the gateway and upstream
+   * settings do not offer it, so there is no way to switch injection handling
+   * off across a surface.
    */
-  private injectionAction(localName: string, upstreamDefault: "strip" | "deny" | "annotate" | undefined) {
+  private injectionAction(
+    localName: string,
+    upstreamDefault: "strip" | "deny" | "annotate" | undefined
+  ): "strip" | "deny" | "annotate" | "accept" {
     return this.config.injection_overrides[localName] ?? upstreamDefault ?? this.config.on_injection;
   }
 

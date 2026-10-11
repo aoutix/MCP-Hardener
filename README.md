@@ -404,12 +404,14 @@ npm test
   verdict however novel its phrasing. It is advertised to the model, scanned, and displayed —
   that is all.
 - `strip` replaces a description wholesale, so a false positive costs the model the information it
-  needs and it will misuse the tool rather than fail. That is a lossy default rather than an
-  unsafe one — nothing in `decide()` reads a description — and it is narrowable: `on_injection` can
-  be set per upstream, and `injection_overrides` per tool for a reviewed false positive. The
-  weakest of the three still prefixes a warning, so an override can restore a description but
-  never hide that it tripped a pattern, and the audit record says when an override produced the
-  action.
+  needs and it will misuse the tool rather than fail. That is a lossy default rather than an unsafe
+  one — nothing in `decide()` reads a description — and it is narrowable: `on_injection` per
+  upstream, and `injection_overrides` per tool, where `accept` passes the original text through for
+  a finding somebody has reviewed. Accepting one changes no permission, for the same reason the
+  default is safe: a description never reaches a verdict. What it cannot do is make the finding
+  disappear — the audit record is written either way, the console still names the patterns that
+  matched, and `accept` is per-tool only, so there is no way to switch injection handling off
+  across a surface.
 - A refusal tells the agent only that a tool was switched off, not who switched it off or the
   reason they typed. Those stay in the audit log and the console. The agent is the operator's own,
   and the upstream never sees either string, but a reason can carry the circumstances of an
