@@ -1055,6 +1055,9 @@ function ConfigurationTab({
   const exposure = verdictOf(tool);
   const permission = permissionOf(tool.effect);
   const audit = server?.audit;
+  /* Whether anything actually bounds this tool's arguments, which is the
+     question the schema's own looseness only gestures at. */
+  const hasBounds = tool.args.some((a) => a.constrainedByRule !== null);
 
   return (
     <div className="space-y-5">
@@ -1230,10 +1233,14 @@ function ConfigurationTab({
         aside={
           <span
             className={`rounded-md px-2 py-0.5 text-xs font-medium ${
-              tool.schemaClosed ? "bg-accent-soft text-accent-strong" : "bg-write/10 text-write"
+              tool.schemaClosed === true
+                ? "bg-accent-soft text-accent-strong"
+                : tool.schemaClosed === false
+                  ? "bg-write/10 text-write"
+                  : "bg-subtle text-ink-soft"
             }`}
           >
-            {tool.schemaClosed ? "Strict" : "Open"}
+            {tool.schemaClosed === true ? "Strict" : tool.schemaClosed === false ? "Open" : "Not declared"}
           </span>
         }
       >
@@ -1249,18 +1256,48 @@ function ConfigurationTab({
             ))
           )}
           <p className="mono mt-1.5 text-[0.6875rem] text-ink-faint">
-            additionalProperties: {String(!tool.schemaClosed)}
+            additionalProperties:{" "}
+            {tool.schemaClosed === null ? "absent" : String(tool.schemaClosed === false)}
           </p>
         </div>
+        {/*
+         * Three statements, because the schema makes three different claims
+         * and only one of them is a finding. Absent is what almost every MCP
+         * server emits, so reading it as "open" put the same warning on every
+         * tool — and a warning that is always on says nothing. The scanner has
+         * only ever flagged an explicit `true`; this now matches it.
+         */}
         <p className="mt-2 flex items-start gap-1.5 text-xs text-ink-soft">
           <Icon
-            name={tool.schemaClosed ? "check" : "alert"}
+            name={tool.schemaClosed === false ? "alert" : tool.schemaClosed === true ? "check" : "info"}
             size={13}
-            className={`mt-0.5 ${tool.schemaClosed ? "text-accent" : "text-write"}`}
+            className={`mt-0.5 ${
+              tool.schemaClosed === false ? "text-write" : tool.schemaClosed === true ? "text-accent" : "text-ink-faint"
+            }`}
           />
-          {tool.schemaClosed
-            ? "An argument the schema does not name is rejected, not silently dropped."
-            : "This schema accepts undeclared arguments."}
+          {tool.schemaClosed === true ? (
+            <>The upstream declared this object closed, so an argument it does not name is rejected.</>
+          ) : tool.schemaClosed === false ? (
+            <>
+              The upstream declared this object <Mono>additionalProperties: true</Mono>, so it accepts arguments the
+              schema never named and the gateway forwards them as given.
+            </>
+          ) : (
+            <>
+              The upstream did not say whether undeclared arguments are accepted, which is what most MCP servers
+              emit. The gateway does not validate arguments against this schema either way —{" "}
+              {hasBounds ? (
+                <>
+                  what bounds them here is the policy rule marked on each argument above.
+                </>
+              ) : (
+                <>
+                  what would bound them is an <Mono>args</Mono> constraint on a policy rule, and no rule constrains
+                  this tool&rsquo;s arguments today.
+                </>
+              )}
+            </>
+          )}
         </p>
       </Section>
 

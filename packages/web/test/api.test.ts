@@ -357,7 +357,32 @@ describe("the function list", () => {
     const amount = tool.args.find((a: { name: string }) => a.name === "amount");
     expect(amount.required).toBe(true);
     expect(amount.constrainedByRule).toBe("create-invoice");
-    expect(tool.schemaClosed).toBe(true);
+  });
+
+  /*
+   * `additionalProperties` absent is not the claim that undeclared arguments
+   * are accepted, and almost no MCP server emits either form — the schemas
+   * most servers generate simply leave it out. Reading absent as "open" put
+   * the same warning on every tool of every gateway, which is no signal at
+   * all. The scanner has only ever flagged an explicit `true`.
+   */
+  it.each([
+    ["closed", false, true],
+    ["explicitly open", true, false],
+    ["left unstated", undefined, null]
+  ])("reports a %s argument object as its own state", async (_label, declared, expected) => {
+    publishSurface(fixture, [
+      tool("probe_schema", {
+        inputSchema: {
+          type: "object",
+          properties: { q: { type: "string" } },
+          ...(declared === undefined ? {} : { additionalProperties: declared })
+        }
+      })
+    ]);
+    const probe = await (await api("/api/v1/servers/billing/tools/probe_schema")).json();
+    expect(probe.schemaClosed).toBe(expected);
+    publishSurface(fixture, SURFACE);
   });
 });
 

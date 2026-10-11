@@ -81,7 +81,19 @@ export interface ToolProtection {
     readonly description: string | undefined;
     readonly constrainedByRule: string | null;
   }[];
-  readonly schemaClosed: boolean;
+  /**
+   * Whether the upstream declared its argument object closed.
+   *
+   * Three states, because `additionalProperties` absent is not the same claim
+   * as `additionalProperties: false`, and almost no MCP server emits either:
+   * the schemas most servers generate simply leave it out. Reading absent as
+   * "open" meant every tool on every gateway carried the same warning, which
+   * is no signal at all — the scanner has always flagged only an explicit
+   * `true`, and this is now consistent with it.
+   *
+   * `true` closed, `false` explicitly open, `null` the upstream did not say.
+   */
+  readonly schemaClosed: boolean | null;
   readonly standingGrants: readonly {
     readonly grantId: string;
     readonly reason: string;
@@ -332,7 +344,8 @@ export function toolProtection(
       description: node.description,
       constrainedByRule: matchedRule?.args?.[name] ? matchedRule.id : null
     })),
-    schemaClosed: schema.additionalProperties === false,
+    schemaClosed:
+      schema.additionalProperties === false ? true : schema.additionalProperties === true ? false : null,
     standingGrants: grants.map((grant) => {
       const match = grantMatches(grant, tool.name, tool.effect, {});
       return {

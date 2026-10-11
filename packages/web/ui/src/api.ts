@@ -99,7 +99,8 @@ export interface ToolProtection {
     description?: string;
     constrainedByRule: string | null;
   }[];
-  schemaClosed: boolean;
+  /** `true` closed, `false` explicitly open, `null` the upstream did not say. */
+  schemaClosed: boolean | null;
   standingGrants: {
     grantId: string;
     reason: string;
