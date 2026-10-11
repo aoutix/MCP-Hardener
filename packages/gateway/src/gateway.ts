@@ -22,6 +22,7 @@ import {
 } from "@hmcp/core";
 import { findInjection, scan, type ScanTool } from "@hmcp/scanner";
 import { classify } from "./classify.js";
+import { displayKey, toolNameProblem } from "./toolname.js";
 import { withCredential, type UpstreamCredential } from "./credential.js";
 import { UpstreamConnection, type UpstreamTool } from "./upstream.js";
 import type { GatewayConfig } from "./config.js";
@@ -175,15 +176,76 @@ export class Gateway {
 
   /** Connects every upstream and classifies its tools. */
   async connectUpstreams(): Promise<void> {
+    /*
+     * What each advertised name reduces to once case and separators are gone,
+     * so a second tool a reviewer could not distinguish from the first is
+     * caught across every upstream rather than only within one.
+     */
+    const claimed = new Map<string, string>();
+
     for (const spec of this.config.upstreams) {
       const connection = await UpstreamConnection.connect(spec, this.egress);
       this.connections.push(connection);
 
       for (const tool of connection.listTools()) {
         const localName = this.config.namespace ? `${spec.name}__${tool.name}` : tool.name;
+
+        /*
+         * The name is a storage key, not just a label: the exposure switch,
+         * every approval row and `bindingHash` are all stored under it, and an
+         * operator reads it to decide what to switch off. A name that cannot be
+         * read, or that a reviewer cannot tell apart from another one, is
+         * refused outright -- the same position as a tool nothing classified.
+         * Exposing it would mean offering a kill switch that appears to work
+         * and does not.
+         */
+        const problem = toolNameProblem(tool.name);
+        if (problem !== undefined) {
+          this.refuseName(localName, spec.name, `the upstream's name for it cannot be used: ${problem}`);
+          continue;
+        }
+
+        const key = displayKey(localName);
+        const existing = claimed.get(key);
+        if (existing !== undefined) {
+          /*
+           * First one wins. Which of the two survives is not the point --
+           * both came from a server we do not control, so it could have put
+           * anything behind either name. What matters is that exactly one
+           * tool answers to what a reviewer sees, so the switch is
+           * unambiguous.
+           */
+          this.refuseName(
+            localName,
+            spec.name,
+            `a reviewer could not tell it apart from "${existing}", which is already exposed`
+          );
+          continue;
+        }
+
+        claimed.set(key, localName);
         this.tools.set(localName, this.prepare(localName, connection, tool));
       }
     }
+  }
+
+  /**
+   * Records a tool withheld because of its name, and leaves it unregistered.
+   *
+   * Unregistered means it never reaches `tools/list` and `tools/call` refuses
+   * it as unknown -- identically to a tool that does not exist, so probing
+   * cannot tell the two apart. Audited at startup like the injection findings,
+   * because the operator needs to know their upstream advertised something
+   * this gateway would not pass on.
+   */
+  private refuseName(localName: string, upstream: string, why: string): void {
+    this.audit.append({
+      tool: localName,
+      decision: "deny",
+      outcome: "denied",
+      rule_id: "gateway.unusable-tool-name",
+      reason: `withheld tool from upstream "${upstream}": ${why}`
+    });
   }
 
   /**

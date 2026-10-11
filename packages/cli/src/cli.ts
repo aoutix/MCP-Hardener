@@ -2,6 +2,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { Command } from "commander";
+import { escapeForDisplay } from "@hmcp/scanner";
 import { parse as parseYaml } from "yaml";
 import {
   ApprovalStore,
@@ -285,8 +286,22 @@ function actor(): string {
 
 class CliError extends Error {}
 
+/*
+ * Every line this command prints passes through here, and some of it is text a
+ * server we do not control chose: a tool name, an upstream's own description,
+ * an actor from a token. A control sequence in any of those rewrites the
+ * terminal -- `ESC[2J ESC[1;1H` clears the screen and homes the cursor, so an
+ * upstream could print a clean-looking report over the real one. JSON escapes
+ * these on the way to disk, so the log file is safe to `cat`; it is parsing it
+ * back and printing it that is not.
+ *
+ * Done at the one place everything funnels through rather than at each call
+ * site, because a new line of output should not be able to reintroduce this by
+ * forgetting. Nothing here prints colour, so there is no legitimate escape to
+ * preserve.
+ */
 function log(message: string): void {
-  process.stdout.write(`${message}\n`);
+  process.stdout.write(`${escapeForDisplay(message)}\n`);
 }
 
 function run(fn: () => void): void {

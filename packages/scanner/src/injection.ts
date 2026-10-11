@@ -108,8 +108,32 @@ function excerptAround(text: string, index: number, length: number, patternId: s
   }
   const start = Math.max(0, index - 20);
   const end = Math.min(text.length, index + length + 20);
-  const snippet = text.slice(start, end).replace(/\s+/g, " ");
+  const snippet = escapeForDisplay(text.slice(start, end)).replace(/\s+/g, " ");
   return `${start > 0 ? "…" : ""}${snippet}${end < text.length ? "…" : ""}`;
+}
+
+/**
+ * Makes a span of untrusted text safe to print.
+ *
+ * An excerpt is a verbatim slice of whatever an upstream advertised, and it is
+ * printed to a terminal and written into reports. A description carrying
+ * `ESC[2J ESC[1;1H` clears the screen and homes the cursor, so an upstream
+ * could rewrite the report *about itself* — `hmcp-gateway scan` could be made
+ * to display "0 findings, surface is clean" over its own output. A security
+ * tool whose output can be forged by the thing it is inspecting is worse than
+ * no tool, because it is believed.
+ *
+ * So every control character becomes a visible escape rather than being
+ * stripped: removing them would hide that the text ever contained them, and
+ * that is exactly the finding a reviewer needs to see. `\x1b` prints as
+ * `\u001b`, which is inert on a terminal and still legible.
+ */
+export function escapeForDisplay(text: string): string {
+  // eslint-disable-next-line no-control-regex
+  return text.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, (ch) => {
+    const code = ch.codePointAt(0)!;
+    return `\\u${code.toString(16).padStart(4, "0")}`;
+  });
 }
 
 /** Removes the characters a human cannot see, for use when sanitizing. */

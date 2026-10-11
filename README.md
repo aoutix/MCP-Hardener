@@ -31,7 +31,8 @@ can be reconstructed from the log afterwards.
 | **Egress limits** | Host allowlist, method allowlist, HTTPS-only, response and request size caps, timeouts. DNS results are checked against private, loopback and link-local space (including `169.254.169.254`) and then pinned for the connection, which closes the rebinding window. Redirects are re-validated per hop rather than followed. |
 | **Audit log** | Append-only JSONL, hash-chained, one record per decision whether allowed, refused or held. Arguments are redacted before they reach disk and hashed so the record stays verifiable. `hmcp audit verify` detects an edited, removed or reordered record. |
 | **Untrusted upstream text** | A tool's description is written by the server being gated and read by the model as instructions. It is scanned for injected instructions before being advertised, and `on_injection` decides whether the text is replaced, labelled, or the tool withheld entirely. The console shows both what the upstream said and what the model was told. |
-| **Dishonest annotations** | An upstream's own hints are trusted only to make a tool *more* restricted, never less, so a server cannot mark its delete tool `readOnlyHint` to slip past a read-only posture. |
+| **Dishonest annotations** | An upstream's own hints are trusted only to make a tool *more* restricted, never less, so a server cannot mark its delete tool `readOnlyHint` to slip past a read-only posture. The name is what contradicts a hint, and it is read across snake_case, kebab-case, camelCase and dotted naming — a classifier that only reads one convention is a check that falls open against every server using another. |
+| **Names a reviewer can read** | A tool name is the key the kill switch, every approval row and `bindingHash` are stored under, so an upstream advertising two names that render identically would mean switching one off and leaving the other live. A name carrying invisible characters, bidirectional overrides or terminal escapes is withheld, as is a second name a reviewer could not tell from the first. |
 | **A tool budget** | A hard stop on how much surface one gateway may expose at all. |
 
 ## Install
@@ -397,7 +398,19 @@ npm test
   to avoid duplicating the tenant id in a second environment variable.
 - Prompt-injection detection is pattern-based. It catches the known shapes and will miss novel
   phrasings, so it belongs behind the structural controls — read-only defaults, approvals, egress
-  limits — not in front of them.
+  limits — not in front of them. Note what that ordering buys: a tool's description never reaches
+  a decision. `decide()` and `classify()` read the name, the effect, the arguments and the
+  upstream's annotations, and nothing reads the description, so injected text cannot change a
+  verdict however novel its phrasing. It is advertised to the model, scanned, and displayed —
+  that is all.
+- `on_injection` is one setting for the whole gateway, and `strip` replaces a description
+  wholesale. A false positive therefore costs the model the information it needs to use that tool
+  correctly, and it will misuse it rather than fail. There is no per-tool override yet, so
+  `annotate` is the safer default on a surface you have not reviewed.
+- Untrusted text is escaped where it is printed, not where it is stored. JSON escapes control
+  characters on the way into the audit log, so the file is safe to `cat`; it is parsing a record
+  back and printing it that would otherwise let an upstream rewrite a terminal, so every line the
+  CLI emits passes through one escaper.
 - A stdio upstream is a child process. The gateway controls its environment and arguments, but
   once running it is a local process and the egress allowlist does not apply to it; only HTTP
   upstreams pass through the guard.
