@@ -32,19 +32,25 @@ export interface ScanTool {
 }
 
 export interface ScanTarget {
-  /** `generated` scans our own output; `upstream` scans a server we did not build. */
+  /**
+   * `upstream` scans a server we did not build, which is what the gateway does.
+   *
+   * `generated` remains for a target assembled from a declared tool surface
+   * rather than discovered over MCP — the rules that need a policy and an API
+   * block to say anything are gated on it.
+   */
   readonly kind: "generated" | "upstream";
   readonly file: string;
   readonly policy?: Policy | undefined;
   readonly tools: readonly ScanTool[];
   readonly api?: { readonly title: string; readonly base_url: string } | undefined;
   /**
-   * Untrusted text from the source document itself, scanned even when it never
-   * reached the generated output: a credential in a spec is disclosed and needs
-   * rotating whether or not we emitted it.
+   * Untrusted text from a source document, scanned even where it never reached
+   * the tool surface: a credential in a document is disclosed and needs
+   * rotating whether or not anything advertised it.
    */
   readonly sourceTexts?: readonly { readonly path: string; readonly text: string }[] | undefined;
-  /** Spec-level facts, available only when generating. */
+  /** Facts about a source document, where the target came from one. */
   readonly spec?:
     | {
         readonly hasSecuritySchemes: boolean;

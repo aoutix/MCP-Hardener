@@ -171,6 +171,98 @@ describe("opening a database written before versioning existed", () => {
   });
 });
 
+describe("opening a database stamped before tool_inventory existed", () => {
+  /*
+   * The case a real upgrade hits: a database already at version 2, which took
+   * `createLatest` before this table was in it and so was never given it. The
+   * console's first read would otherwise fail with `no such table`.
+   */
+  function writeAtVersion(target: number): void {
+    new ApprovalStore(path).close();
+    const db = new DatabaseSync(path);
+    db.exec("DROP TABLE IF EXISTS tool_inventory");
+    db.exec(`PRAGMA user_version = ${target}`);
+    db.close();
+  }
+
+  it("adds the table and stamps the new version", () => {
+    writeAtVersion(2);
+    const store = new ApprovalStore(path);
+    expect(store.inventory("gateway:notes")).toEqual([]);
+    store.close();
+    expect(version()).toBe(LATEST_SCHEMA_VERSION);
+  });
+
+  it("keeps the rows that were already there", () => {
+    const first = new ApprovalStore(path);
+    first.scoped(componentScope("gateway:notes")).disableTool("delete_note", "alice");
+    first.close();
+    writeAtVersion(2);
+
+    const store = new ApprovalStore(path);
+    expect(store.scoped(componentScope("gateway:notes")).toolExposure("delete_note")!.set_by).toBe("alice");
+    store.close();
+  });
+
+  it("backfills nothing, because nothing published is the only honest answer", () => {
+    // The rows describe what a *running* process serves. A gateway that has
+    // not started since the upgrade has told us nothing, and a reader already
+    // has to treat an absent inventory that way.
+    writeAtVersion(2);
+    const store = new ApprovalStore(path);
+    expect(store.inventoryPid("gateway:notes")).toBeUndefined();
+    store.close();
+  });
+});
+
+describe("publishing a tool surface", () => {
+  const tool = (name: string) => ({
+    tool: name,
+    upstream: "notes",
+    effect: "read" as const,
+    effectSource: "policy",
+    description: `${name}.`,
+    rawDescription: `${name}.`,
+    inputSchema: { type: "object" },
+    hidden: false,
+    injection: null
+  });
+
+  it("replaces the previous set rather than merging into it", () => {
+    // A tool an upstream stopped offering has to disappear. Left behind, a
+    // reader would present it as part of what is being served now.
+    const store = new ApprovalStore(path);
+    store.publishInventory("gateway:notes", 1, [tool("get_note"), tool("delete_note")]);
+    expect(store.inventory("gateway:notes").map((r) => r.tool)).toEqual(["delete_note", "get_note"]);
+
+    store.publishInventory("gateway:notes", 1, [tool("get_note")]);
+    expect(store.inventory("gateway:notes").map((r) => r.tool)).toEqual(["get_note"]);
+    store.close();
+  });
+
+  it("keeps one component's surface out of another's", () => {
+    const store = new ApprovalStore(path);
+    store.publishInventory("gateway:notes", 1, [tool("get_note")]);
+    store.publishInventory("gateway:billing", 2, [tool("list_invoices")]);
+
+    expect(store.inventory("gateway:notes").map((r) => r.tool)).toEqual(["get_note"]);
+    expect(store.inventory("gateway:billing").map((r) => r.tool)).toEqual(["list_invoices"]);
+    expect(store.inventoryPid("gateway:billing")).toBe(2);
+    store.close();
+  });
+
+  it("records which process published, so two gateways cannot be blended", () => {
+    const store = new ApprovalStore(path);
+    store.publishInventory("gateway:notes", 111, [tool("get_note")]);
+    expect(store.inventoryPid("gateway:notes")).toBe(111);
+
+    store.publishInventory("gateway:notes", 222, [tool("create_note")]);
+    expect(store.inventoryPid("gateway:notes")).toBe(222);
+    expect(store.inventory("gateway:notes").map((r) => r.tool)).toEqual(["create_note"]);
+    store.close();
+  });
+});
+
 describe("opening a database that does not exist yet", () => {
   it("creates it at the current shape and stamps the version", () => {
     const store = new ApprovalStore(path);

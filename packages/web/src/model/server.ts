@@ -1,26 +1,29 @@
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { dirname } from "node:path";
 import {
   ApprovalStore,
   NO_TENANT,
   expandPath,
-  generatedPaths,
-  loadPolicy,
+  normalizeTenantKey,
+  queryAuditLog,
   resolveTenant,
   type Policy,
   type RegistryEntry,
   type Scope,
   type ScopedApprovals
 } from "@hmcp/core";
-import { parseToolsFile, type ToolsFile } from "@hmcp/server-runtime";
 import { loadGatewayConfig, type LoadedGatewayConfig } from "hmcp-gateway";
 
 /**
- * One registered server, resolved from disk.
+ * One registered gateway, resolved from disk.
  *
- * Parsing goes through the same `parseToolsFile` and `loadPolicy` the runtime
- * uses at boot, so the console cannot show a server that the runtime would
- * refuse to start.
+ * Parsing goes through the gateway's own `loadGatewayConfig`, so the console
+ * cannot show a gateway that the gateway itself would refuse to start.
+ *
+ * Note what is *not* here: the tool surface. A gateway's tools come from its
+ * upstreams over MCP, which only the gateway process has spoken to, so they are
+ * read separately from what that process publishes rather than from a file next
+ * to the config.
  */
 export interface LoadedServer {
   readonly entry: RegistryEntry;
@@ -28,9 +31,7 @@ export interface LoadedServer {
   readonly cwd: string;
   readonly policy: Policy;
   readonly policyPath: string;
-  readonly tools: ToolsFile | null;
-  readonly toolsPath: string | null;
-  readonly gateway: LoadedGatewayConfig | null;
+  readonly gateway: LoadedGatewayConfig;
   /** The audit `component` records from this server are expected to carry. */
   readonly component: string;
   readonly auditPath: string;
@@ -54,38 +55,6 @@ function mtime(path: string): number {
 }
 
 export function loadServer(entry: RegistryEntry): LoadedServer {
-  if (entry.kind === "gateway") return loadGatewayEntry(entry);
-  return loadGeneratedEntry(entry);
-}
-
-function loadGeneratedEntry(entry: RegistryEntry & { kind: "generated" }): LoadedServer {
-  const { toolsPath, policyPath } = generatedPaths(entry);
-  if (!existsSync(toolsPath)) throw new Error(`no tools.json at ${toolsPath}`);
-  if (!existsSync(policyPath)) throw new Error(`no policy.yaml at ${policyPath}`);
-
-  const tools = parseToolsFile(JSON.parse(readFileSync(toolsPath, "utf8")), toolsPath);
-  const policy = loadPolicy(policyPath);
-  const cwd = dirname(toolsPath);
-
-  return {
-    entry,
-    cwd,
-    policy,
-    policyPath,
-    tools,
-    toolsPath,
-    gateway: null,
-    // Mirrors how the runtime labels its own records, so attribution lines up
-    // with what is already in existing logs.
-    component: entry.component ?? `generated:${tools.api.title}`,
-    auditPath: expandPath(policy.audit.path, cwd),
-    storePath: expandPath(policy.approvals.store_path, cwd),
-    ...resolveTenantSafely(policy),
-    mtimes: { [toolsPath]: mtime(toolsPath), [policyPath]: mtime(policyPath) }
-  };
-}
-
-function loadGatewayEntry(entry: RegistryEntry & { kind: "gateway" }): LoadedServer {
   const configPath = expandPath(entry.config_path);
   if (!existsSync(configPath)) throw new Error(`no gateway config at ${configPath}`);
   // Reuses the gateway's own loader, which already resolves an inline-or-path
@@ -99,8 +68,6 @@ function loadGatewayEntry(entry: RegistryEntry & { kind: "gateway" }): LoadedSer
     cwd,
     policy: gateway.policy,
     policyPath: configPath,
-    tools: null,
-    toolsPath: null,
     gateway,
     component: entry.component ?? `gateway:${gateway.config.name}`,
     auditPath: expandPath(gateway.policy.audit.path, cwd),
@@ -172,21 +139,129 @@ export function storeFor(server: LoadedServer): ApprovalStore {
 }
 
 /**
- * The scope this server's rows live under in that store.
+ * Whose rows a request is asking about.
  *
- * The console reads a shared database — one file commonly holds rows for
- * several servers — so every read it makes has to say whose rows it wants.
- * Until this existed it did not, and the nearest thing to a filter was a
- * cosmetic check that a row's tool name appeared in this server's tools.json,
- * which told two deployments of the same server apart not at all.
+ * This is the console's single most dangerous input, so it is a decision rather
+ * than a default. Approvals, grants and the exposure switch are all keyed
+ * `(component, tenant)`, and the gateway reads them under the tenant it
+ * resolved from the *caller's* token. If the console guesses a different one,
+ * every read looks empty and — far worse — every write lands on a row nothing
+ * will ever read. A kill switch written into the wrong tenant looks exactly
+ * like protection and is none.
+ *
+ * `hmcp-gateway exposure` already refuses to guess here for the same reason.
+ * The console used to guess, from `resolveTenant` over its own environment,
+ * while its own comment described that value as advisory.
  */
-export function scopeOf(server: LoadedServer): Scope {
-  return { component: server.component, tenant: server.tenantValue ?? NO_TENANT };
+export type TenantChoice =
+  | { readonly ok: true; readonly tenant: string; readonly explicit: boolean }
+  | { readonly ok: false; readonly why: string };
+
+/**
+ * Settles the tenant for one request.
+ *
+ * Three cases, and they differ in whether the console can legitimately know
+ * the answer:
+ *
+ * - **No tenant configured.** The gateway scopes everything to `NO_TENANT`, so
+ *   that is the only correct key and naming another one is a mistake worth
+ *   refusing rather than honouring.
+ * - **`jwt-verified`.** Resolved per request from the caller's token. One
+ *   gateway serves every tenant at once and the console's own environment says
+ *   nothing about any of them, so the request has to name one.
+ * - **`static`, `env` or `jwt-claim`.** A property of the deployment, resolved
+ *   once at startup, and the console reads it from the same place the gateway
+ *   does. Defaulting is legitimate here — but an explicit value still wins, so
+ *   an operator whose console environment differs from the gateway's can say
+ *   so instead of being quietly wrong.
+ */
+export function chooseTenant(server: LoadedServer, requested: string | null): TenantChoice {
+  const config = server.policy.tenant;
+
+  if (!config) {
+    if (requested !== null && requested !== NO_TENANT) {
+      return {
+        ok: false,
+        why:
+          `"${server.entry.id}" has no tenant configured, so every row it writes is scoped to the empty ` +
+          `tenant. Asking for "${requested}" would read and write rows this gateway never touches.`
+      };
+    }
+    return { ok: true, tenant: NO_TENANT, explicit: false };
+  }
+
+  if (requested !== null && requested !== "") {
+    try {
+      return { ok: true, tenant: normalizeTenantKey(requested), explicit: true };
+    } catch (err) {
+      return { ok: false, why: (err as Error).message };
+    }
+  }
+
+  if (config.source.kind === "jwt-verified") {
+    return {
+      ok: false,
+      why:
+        `"${server.entry.id}" resolves its tenant per request, from the verified "${config.source.claim}" ` +
+        `claim of the caller's token, so there is no single tenant for this console to assume. Name one ` +
+        `with ?tenant=<id>. Guessing would read an empty queue and write a switch the gateway never reads.`
+    };
+  }
+
+  if (server.tenantValue === undefined) {
+    return {
+      ok: false,
+      why:
+        server.tenantError ??
+        `"${server.entry.id}" requires a tenant and none resolved from ${describeTenantSource(server.policy)}. ` +
+        `Name one with ?tenant=<id>.`
+    };
+  }
+
+  return { ok: true, tenant: server.tenantValue, explicit: false };
 }
 
-/** `storeFor` already narrowed to this server and its tenant. */
-export function scopedFor(server: LoadedServer): ScopedApprovals {
-  return storeFor(server).scoped(scopeOf(server));
+/**
+ * The scope this gateway's rows live under in that store.
+ *
+ * The console reads a shared database — one file commonly holds rows for
+ * several gateways and several tenants — so every read it makes has to say
+ * whose rows it wants.
+ */
+export function scopeFor(server: LoadedServer, tenant: string): Scope {
+  return { component: server.component, tenant };
+}
+
+/** `storeFor` already narrowed to this gateway and one named tenant. */
+export function scopedFor(server: LoadedServer, tenant: string): ScopedApprovals {
+  return storeFor(server).scoped(scopeFor(server, tenant));
+}
+
+/**
+ * Which tenants this gateway has any trace of, so a selector can be offered
+ * rather than a free-text box with no hint in it.
+ *
+ * Two sources, because neither alone is complete. `listScopes` covers tenants
+ * with approvals, grants or exposure rows; the audit log covers one that has
+ * only ever made calls, which has rows in none of those three. Both are
+ * historical — a tenant that has never been seen will not appear, which is why
+ * naming one by hand stays possible.
+ */
+export function knownTenants(server: LoadedServer, auditSample = 2000): string[] {
+  const seen = new Set<string>();
+  for (const scope of storeFor(server).listScopes()) {
+    if (scope.component === server.component) seen.add(scope.tenant);
+  }
+  if (server.policy.audit.enabled) {
+    try {
+      for (const record of queryAuditLog(server.auditPath, { limit: auditSample }).records) {
+        if (record.component === server.component) seen.add(record.tenant ?? NO_TENANT);
+      }
+    } catch {
+      /* a missing or unreadable log costs the hint, never the page */
+    }
+  }
+  return [...seen].sort();
 }
 
 export function closeStores(): void {

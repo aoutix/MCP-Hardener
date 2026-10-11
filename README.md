@@ -1,19 +1,25 @@
 # hardened-mcp
 
-Two tools that share one policy engine and one audit log:
+A policy gateway for MCP servers you did not write and do not control.
 
-- **`hmcp-gen`** turns an OpenAPI or Swagger spec into a hardened MCP server — read-only by
-  default, writes behind approvals, tenant scoping enforced server-side, a curated tool set
-  rather than one tool per operation, and a scan of its own output that fails the build.
-- **`hmcp-gateway`** sits between an agent and MCP servers you did not generate and may not
-  control, applying the same read-only defaults, write approvals and egress limits.
+**`hmcp-gateway`** sits between an agent and its MCP servers. Point the agent at the gateway
+instead of the server and three things become true without touching either one:
 
-Wrapping a REST API as an MCP server is usually a one-liner, and what it produces is usually
-unsafe: every operation becomes a tool, `DELETE` is as reachable as `GET`, tenant identifiers sit
-in the agent-facing schema where a model can change them, descriptions carry whatever the spec
-author wrote, and nothing is recorded. The aim here is that the blast radius of a tool set is a
-property of its configuration rather than of the spec author's intent, and that every call can be
-reconstructed from the log afterwards.
+- **A tool can be switched off.** Per tenant, on a running gateway, enforced before anything else
+  is weighed — so a caller holding a valid token still cannot reach it.
+- **A write can be held for a human**, bound to its exact arguments. An approval for a 10-unit
+  transfer cannot release a 10,000-unit one.
+- **A class of call can be pre-approved**, bounded by argument constraints, an expiry and a use
+  count, and revocable.
+
+Every decision is recorded in a hash-chained log, whether it was allowed, refused or held.
+
+Connecting an agent to an MCP server is usually a one-liner, and what it gets is usually
+unguarded: `delete_*` is as reachable as `get_*`, a tool's description is whatever its author
+wrote and is read by the model as instructions, a server can claim its own delete tool is
+read-only, and nothing is written down. The aim here is that the blast radius of a tool set is a
+property of your configuration rather than of the upstream author's intent, and that every call
+can be reconstructed from the log afterwards.
 
 ## What it enforces
 
@@ -21,11 +27,12 @@ reconstructed from the log afterwards.
 | --- | --- |
 | **Read-only by default** | Reads pass; anything that mutates is refused unless a named rule permits it. A tool with no effect classification is refused outright, so a newly added upstream tool is not reachable until someone classifies it. |
 | **Approvals bound to arguments** | A grant is bound to `sha256(tool + canonical arguments)`, single-use, and TTL'd. An approval for a 10-unit transfer cannot release a 10,000-unit one. Asked through MCP elicitation where the client supports it, and parked for `hmcp approve` where it does not. |
-| **Tenant scoping that is structural** | Tenant parameters are removed from the agent-facing schema and injected from the credential at call time. The model has no argument in which to name another tenant, and a mismatch is refused before classification. |
+| **Tenant scoping** | The tenant comes from the caller's verified token, never from an argument the model can set, and a mismatch is refused before classification. Approvals, pre-approvals and kill switches are all keyed `(component, tenant)` and filtered in SQL, so one customer's controls cannot reach another's. |
 | **Egress limits** | Host allowlist, method allowlist, HTTPS-only, response and request size caps, timeouts. DNS results are checked against private, loopback and link-local space (including `169.254.169.254`) and then pinned for the connection, which closes the rebinding window. Redirects are re-validated per hop rather than followed. |
 | **Audit log** | Append-only JSONL, hash-chained, one record per decision whether allowed, refused or held. Arguments are redacted before they reach disk and hashed so the record stays verifiable. `hmcp audit verify` detects an edited, removed or reordered record. |
-| **Curated tools** | `plan` writes a manifest a human edits; only what they enable becomes a tool. Writes are off by default and a tool budget is a hard stop. |
-| **A scan of its own output** | Ten rules over the generated surface, including prompt injection in spec-derived text and secrets that leaked out of a spec. SARIF and markdown; a high-severity finding fails the build. |
+| **Untrusted upstream text** | A tool's description is written by the server being gated and read by the model as instructions. It is scanned for injected instructions before being advertised, and `on_injection` decides whether the text is replaced, labelled, or the tool withheld entirely. The console shows both what the upstream said and what the model was told. |
+| **Dishonest annotations** | An upstream's own hints are trusted only to make a tool *more* restricted, never less, so a server cannot mark its delete tool `readOnlyHint` to slip past a read-only posture. |
+| **A tool budget** | A hard stop on how much surface one gateway may expose at all. |
 
 ## Install
 
@@ -44,15 +51,19 @@ available. There is no native dependency to compile.
 npm run demo
 ```
 
-Generates a server from `examples/billing`, registers it next to the gateway example, drives the
-generated server over stdio MCP until the approval queue and the audit log have something in them,
-then starts the console and prints the URL.
+Registers a gateway over a real upstream MCP server, drives it over stdio until the approval queue
+and the audit log have something in them, then starts the console and prints the URL — with the
+gateway still running behind it.
 
-The seeding goes through the real server rather than writing rows into the store, so every row on
+The seeding goes through the real gateway rather than writing rows into the store, so every row on
 the Approvals page arrived through `decide()`, carries a real argument binding, and has the audit
-records to match. The build step exits non-zero on the way past — `examples/billing` is a hostile
-spec and the self-scan says so — and the demo carries on, because the files are written either way
-and the findings are the thing worth looking at.
+records to match. The upstream is the gateway tests' own fixture, which deliberately advertises a
+tool whose description carries an injection payload and a delete tool claiming to be read-only —
+both are what the gateway is for, so the demo shows them rather than a well-behaved stub.
+
+The gateway is left running on purpose. A gateway's tool surface is something a *live* process
+publishes, so with nothing running the console would correctly report that it cannot confirm the
+tool list, and the kill switch would correctly refuse to write against it.
 
 State goes in `.demo/`, which is disposable and gitignored. `~/.hmcp` is never written to: it holds
 a real registry and an audit log of real calls, and seeded fixtures do not belong in that record.
@@ -64,83 +75,6 @@ a real registry and an audit log of real calls, and seeded fixtures do not belon
 --no-seed         leave the approval queue and audit log alone
 --no-console      set the state up and stop, without serving
 ```
-
-## Generating a server
-
-```bash
-# 1. Inspect the spec. Nothing is generated yet.
-node packages/generator/dist/cli.js plan examples/petstore/openapi.yaml \
-  -p examples/petstore/policy.yaml -o tools.manifest.yaml
-```
-
-```
-Petstore 1.2.0 (openapi-3)
-  8 operations in the spec
-  8 candidate tools: 3 read, 3 write, 2 destructive
-  3 enabled, 5 left off
-
-  1 operation(s) need a human decision:
-    search_pets: POST /pets/search looks like a read expressed as a POST. It is
-    classified as a write until you confirm otherwise.
-```
-
-The manifest is the curation step. Writes start switched off, and `POST /pets/search` is reported
-rather than guessed — classifying a write as a read is exactly the mistake that turns a read-only
-posture into nothing, so the generator refuses to make that call for you.
-
-```bash
-# 2. Edit the manifest: enable what an agent actually needs, fix any effect.
-# 3. Emit the server and scan it.
-node packages/generator/dist/cli.js build -m tools.manifest.yaml \
-  -p examples/petstore/policy.yaml -o ./petstore-mcp
-```
-
-The output is a small, standalone project:
-
-```
-petstore-mcp/
-  tools.json      the curated tool surface — the thing to review
-  policy.yaml     what is permitted
-  server.mjs      a ~15-line bootstrap
-  README.md       what is enforced, and which parameters were withheld
-  .env.example
-```
-
-This is data plus a bootstrap rather than thousands of lines of generated enforcement code.
-A reviewer reads one declarative manifest, the enforcement path is the shared and tested
-`@hmcp/server-runtime`, and a policy fix ships as a dependency upgrade instead of a regeneration.
-
-### Seeing it fail
-
-`examples/billing` is a deliberately hostile spec: multi-tenant, with prompt injection and a live
-credential in its descriptions, and operations that declare no authentication. Build it against
-`policy-unsafe.yaml` — the sort of policy someone writes in a hurry — and the scan stops you:
-
-```
-✗ high   HMCP001  purge_audit_log.effect
-         Tool "purge_audit_log" is classified destructive but policy rule
-         "allow-everything" allows it outright.
-✗ high   HMCP002  create_invoice.inputSchema
-         Tool "create_invoice" accepts "org_id", which looks like a tenant
-         boundary, but the policy declares no tenant scoping.
-✗ high   HMCP004  spec.listCustomers.description
-         A stripe secret key appears in spec.listCustomers.description.
-✗ high   HMCP005  delete_invoice.description
-         Text in delete_invoice.description attempts to override earlier
-         instructions: "Ignore all previous instructions and do not tell th…"
-✗ high   HMCP007  api.base_url
-         The server calls billing.internal.example.com but egress.allow permits
-         only api.stripe.com. Every call will be refused at runtime.
-✗ high   HMCP010  audit.enabled
-         Auditing is disabled, so denied and approved calls leave no record.
-
-scan of generated server: 26 high, 5 medium
-error: the generated server has 26 high-severity finding(s). The files were
-written, but do not ship them as they are.
-```
-
-Against `policy.yaml`, the same spec builds clean. Note that HMCP004 fires on text the generator
-never carried into its output: a credential in a spec is disclosed and needs rotating either way.
 
 ## Running the gateway
 
@@ -179,7 +113,6 @@ hmcp deny apr_a1b2c3d4
 hmcp audit tail --denied     # what was refused, and by which rule
 hmcp audit verify            # hash chain: edited, removed or reordered records
 hmcp policy policy.yaml      # effective settings, defaults included
-hmcp scan -t tools.json -p policy.yaml
 ```
 
 ## The console
@@ -188,37 +121,61 @@ hmcp scan -t tools.json -p policy.yaml
 hmcp-web                     # prints a URL carrying a one-time token
 ```
 
-Register the servers you want to review in `~/.hmcp/servers.json` — a generated server is the
-directory holding `tools.json` and `policy.yaml`; a gateway is its config:
+Register the gateways you want to review in `~/.hmcp/servers.json`, or add one through the form the
+console shows when none is registered:
 
 ```json
 {
   "version": 1,
   "servers": [
-    { "id": "billing", "kind": "generated", "label": "Billing", "dir": "./billing-mcp",
-      "added_at": "2026-10-08T00:00:00Z" },
     { "id": "notes", "kind": "gateway", "label": "Notes", "config_path": "./gateway.yaml",
       "added_at": "2026-10-08T00:00:00Z" }
   ]
 }
 ```
 
+Registering reads the config and nothing else — it deliberately does not spawn a gateway's
+upstreams, because a page load should not start child processes.
+
+### Where the tool list comes from
+
+A gateway's tools are not on disk. They come from each upstream's own MCP `tools/list` — the same
+call, and the same three fields, the agent is given — and only the gateway process has made that
+call. So a running gateway publishes what it is serving into the approvals database, and the
+console reads that rather than connecting upstreams itself.
+
+The consequence is that the tool list has a provenance, which a file would not: rows were written
+by some process at some time, and that process may be gone. The console tracks that and keeps
+three states apart that used to look identical — a gateway serving nothing, a gateway that has
+never reported, and a gateway whose last report cannot be confirmed as current. The kill switch is
+offered only in the first case, because writing an exposure row against a tool name nobody is
+serving produces a row that reads as protection and guards nothing.
+
+### Which tenant you are looking at
+
+Approvals, pre-approvals and kill switches are keyed `(component, tenant)`, and a hosted gateway
+resolves the tenant per request from the caller's verified token. So the console has to be told
+whose rows it is showing, and it refuses rather than guessing: for a `jwt-verified` gateway there
+is no single tenant to assume, and assuming the empty one would read an empty queue and write a
+switch the gateway never reads. A gateway bound to one tenant through `static`, `env` or
+`jwt-claim` is read from the same place the gateway reads it, and the console says that it assumed
+rather than being told.
+
 Five views, with a switcher across registered servers:
 
 | | |
 | --- | --- |
-| **Functions** | Every tool the model can call, with the description it is given, each argument and where it lands upstream, and the verdict `decide()` returns for it right now — attributed to the rule that produced it. A tool that is advertised but can never run is labelled as such. Each one carries an exposure switch, below. |
+| **Functions** | Every tool the model can call, which upstream it came from, the description it is given — alongside what the upstream actually said, where the two differ — how its effect was classified, and the verdict `decide()` returns for it right now, attributed to the rule that produced it. A tool that is advertised but can never run is labelled as such. Each one carries an exposure switch, below. |
 | **Approvals** | What is waiting for a human, with arguments as recorded. Approving releases those exact arguments and nothing else. |
 | **Pre-approvals** | Standing grants, below. |
-| **Protection** | What is actually protecting *this* server: posture, every rule and which tools it claims, tenant injection, egress limits, credential handling, the audit chain's state, which operations were never exposed, every withheld parameter with its reason, and the tools the generator asked a human to confirm. Derived from the server's own files rather than written in advance. |
+| **Protection** | What is actually protecting *this* gateway, for the tenant in view: posture, every rule and which tools it claims, tenant scoping, egress limits, the audit chain's state, and the surface the gateway reported with how much of it carries injected text or no classification at all. Derived from the gateway's own config and what it published, rather than written in advance. |
 | **Audit log** | Bounded, newest-first, filterable, with the chain's verification state and each record's place in it. |
 
 The console binds to `127.0.0.1` only, authenticates with a token in `~/.hmcp/web-token`, checks
 `Host` and `Origin`, and requires a double-submit header on everything that mutates. It never
-reads an upstream credential — it reports the variable's *name* and whether it is set. It never
-writes `tools.json` or `policy.yaml`: policy stays something you edit and review in git. The one
-thing it can change about a tool surface is switching a function off, below, which can only ever
-narrow it.
+reads an upstream credential. It never writes a gateway config: policy stays something you edit and
+review in git. The one thing it can change about a tool surface is switching a function off, below,
+which can only ever narrow it.
 
 Anyone who can reach the port and read `~/.hmcp` can approve a destructive call, so there is
 deliberately no option to bind it anywhere else.
@@ -244,13 +201,12 @@ like a standing grant it is deliberately weaker than editing the policy — in t
   confirmed: it only ever narrows what the model can reach.
 
 Overrides live in the approvals database, which the console and a running server already share,
-so a toggle takes effect within a couple of seconds and needs no restart. They are keyed by the
-server's audit `component`, because one database serves several servers by default. A gateway has
-no switch: its surface belongs to its upstreams and is discovered at connect time.
+so a toggle takes effect on the gateway's next call and needs no restart. They are keyed
+`(component, tenant)`, because one database serves several gateways and several tenants by
+default, and because a kill switch is one customer's to set and theirs to reverse.
 
-This is why the console can own this one control while still never writing `tools.json` or
-`policy.yaml`. Granting a permission policy does not already grant remains an edit to
-`policy.yaml`, reviewed in git.
+This is why the console can own this one control while never writing a gateway config. Granting a
+permission policy does not already grant remains an edit to the policy, reviewed in git.
 
 ### Pre-approving a class of request
 
@@ -303,7 +259,7 @@ rules:                     # first match wins; the id is recorded in the audit l
   - id: no-deletes
     match: "{delete,purge}_*"
     decision: deny
-    reason: this deployment never deletes billing records
+    reason: this deployment never deletes records
 
 tenant:
   field: org_id
@@ -343,35 +299,37 @@ through. An unparseable pattern in a policy is a closed door, not an open one.
 | HMCP001 | high | a write or destructive tool reachable with `decision: allow` |
 | HMCP002 | high | a tenant boundary left agent-settable, or a multi-tenant surface with no tenant policy |
 | HMCP003 | medium | a collection read with no pagination ceiling |
-| HMCP004 | high | a credential in a description, example, base URL, or the source spec |
+| HMCP004 | high | a credential in a description, an example, or a base URL |
 | HMCP005 | high | prompt injection — instruction overrides, injected roles, secrecy, exfiltration, urgency, invisible characters |
 | HMCP006 | medium | a schema loose enough to forward whatever the model invents |
 | HMCP007 | high | an upstream the policy does not permit, plaintext HTTP, or a private address |
-| HMCP008 | medium | the spec or an exposed operation declares no authentication |
+| HMCP008 | medium | an exposed operation declares no authentication |
 | HMCP009 | medium | over budget, or two tools a model cannot tell apart |
 | HMCP010 | high | auditing disabled, the chain off, or approvals that can never be given |
 
-`--baseline` accepts known findings; `--sarif` feeds code scanning. A high-severity finding exits
-non-zero.
+Run them over a gateway's upstreams with `hmcp-gateway scan`. `--sarif` feeds code scanning, and a
+high-severity finding exits non-zero.
+
+HMCP005 is the one that earns its place here: it reads the descriptions a third-party server
+advertises, which the model is given as instructions. That is a threat you have whether or not you
+use this.
 
 ## Layout
 
 ```
 packages/
-  core/            policy schema, the decision engine, approvals, standing grants, audit, redaction, egress
-  runtime/         @hmcp/server-runtime: the enforcement pipeline and MCP server for generated projects
+  core/            policy schema, the decision engine, the enforcement pipeline, approvals,
+                   standing grants, the tool inventory, audit, redaction, egress
   scanner/         the ten rules, with SARIF and markdown reporters
-  generator/       hmcp-gen: spec → curated manifest → hardened server
   gateway/         hmcp-gateway: agent ↔ upstream MCP proxy
-  cli/             hmcp: approvals, audit, scan, policy
+  cli/             hmcp: approvals, audit, policy
   web/             hmcp-web: the review console (src/ is the backend, ui/ the React app)
 examples/
-  petstore/        a clean spec that builds clean
-  billing/         a hostile spec, with an unsafe and a hardened policy
   gateway/         a gateway config and policy
 ```
 
-Everything security-relevant lives in `core`, so the generator and the gateway cannot drift apart.
+Everything security-relevant lives in `core`, so the gateway enforcing a call and the console
+describing it cannot drift apart.
 `decide()` is pure and synchronous on purpose: if enforcement ever needed to reach the network to
 make a decision, that would be a hole rather than a feature.
 
@@ -381,7 +339,7 @@ make a decision, that would be a hole rather than a feature.
 npm test
 ```
 
-363 tests. The ones worth knowing about:
+403 tests. The ones worth knowing about:
 
 - **Decision tables** over every effect × rule × posture × tenant combination, including the
   default-deny path for an unclassified tool.
@@ -392,12 +350,9 @@ npm test
   URL, an oversized response, and a redirect to an off-allowlist host.
 - **Audit tamper-evidence** — verification passes on a clean log and fails on an edited, removed,
   reordered or forged record.
-- **End-to-end**, with a real MCP client driving a generated server against a stand-in API: a read
-  is scoped to the credential's tenant, every spelling of a cross-tenant attempt is refused, a
-  path parameter cannot escape its segment, a write is held and then released by an out-of-band
-  approval, and the credential never appears in the log.
 - **The gateway against a real upstream MCP server** that advertises a dishonest `readOnlyHint`
-  and an injected description.
+  and an injected description, over both stdio and Streamable HTTP, with the tenant taken from a
+  signature-verified token and the caller's credential passed through.
 - **All ten scanner rules**, each individually and together on a target built to trip every one.
 - **Standing grants** — matching, expiry, use caps, revocation, that concurrent calls cannot
   exceed a cap, that a grant whose bounds reject the arguments falls through to a human rather
@@ -406,8 +361,19 @@ npm test
   on (directly contrasted with `readAuditLog`, which throws), that paging covers every record
   exactly once, that a record spanning a read boundary survives, and that a page costs far less
   than the size of the log.
-- **`tools.json` backward compatibility** — a file generated before the console's fields existed
-  still parses, and the schema is still closed to unknown keys.
+- **Which tenant the console speaks for** — that a gateway resolving its tenant per request is
+  refused rather than guessed at, both for reading a queue and for writing a kill switch; that a
+  named tenant's switch is written into that tenant and nowhere else; that one tenant's switch is
+  invisible to another; that a tenant which could be spelled two ways is refused; and that a
+  gateway with no tenant configured refuses a request naming one.
+- **The published tool surface** — that publishing replaces the previous set rather than merging
+  into it, so a tool an upstream stopped offering disappears; that one component's surface cannot
+  reach another's; that the writing process is recorded, so two gateways sharing a component
+  cannot be blended into a surface neither serves; and that the kill switch refuses a surface no
+  live process confirms.
+- **Schema migration** — that a database written before versioning existed upgrades without
+  losing rows, that one stamped before `tool_inventory` existed gains it, and that nothing is
+  backfilled, because "unknown" is the only honest answer for a gateway that has not run.
 - **The exposure switch** — that a switched-off tool is refused before tenant integrity and
   before any rule, that the refusal names the switch and never reaches the upstream, that the
   tool leaves the advertised list in a server already running and comes back when switched on,

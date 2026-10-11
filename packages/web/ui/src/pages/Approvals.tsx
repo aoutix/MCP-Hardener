@@ -42,9 +42,9 @@ function arrange(rows: readonly Approval[] | null, query: string, order: Order):
  * decision about this call and not about the tool in general. Polled at 2s
  * because somebody is waiting on the other end.
  */
-export function Approvals({ serverId }: { serverId: string }) {
-  const pending = useResource(() => api.pending(serverId), [serverId], 2000);
-  const history = useResource(() => api.approvals(serverId), [serverId], 15000);
+export function Approvals({ serverId, tenant }: { serverId: string; tenant: string | null }) {
+  const pending = useResource(() => api.pending(serverId, tenant), [serverId, tenant], 2000);
+  const history = useResource(() => api.approvals(serverId, tenant), [serverId, tenant], 15000);
   const [busy, setBusy] = useState<string | null>(null);
   const [notes, setNotes] = useState<Record<string, string>>({});
   const [failure, setFailure] = useState<string | null>(null);
@@ -59,7 +59,7 @@ export function Approvals({ serverId }: { serverId: string }) {
     setBusy(id);
     setFailure(null);
     try {
-      await api.decide(serverId, id, state, notes[id] ?? "");
+      await api.decide(serverId, id, state, notes[id] ?? "", tenant);
       pending.reload();
       history.reload();
     } catch (err) {

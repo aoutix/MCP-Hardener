@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
@@ -8,6 +8,7 @@ import { queryAuditLog, verifyAuditLog } from "@hmcp/core";
 import { buildRoutes } from "../src/api.js";
 import { createConsoleServer } from "../src/http.js";
 import { closeStores } from "../src/model/server.js";
+import { publishSurface, tool, writeGatewayFixture, type GatewayFixture } from "./fixtures/gateway.js";
 
 const TOKEN = "grants-test-token-0123456789";
 
@@ -17,83 +18,47 @@ let server: Server;
 let port: number;
 let cookies = "";
 let csrf = "";
-
-const TOOLS = {
-  version: 1,
-  api: { title: "Billing", version: "1.0.0", base_url: "https://api.example.com" },
-  auth: { kind: "none" },
-  tools: [
-    {
-      name: "create_invoice",
-      description: "Create an invoice.",
-      effect: "write",
-      method: "POST",
-      path: "/invoices",
-      inputSchema: {
-        type: "object",
-        properties: { amount: { type: "integer" } },
-        additionalProperties: false
-      },
-      bindings: { amount: { in: "body", name: "amount" } },
-      bodyMode: "json",
-      tenantParams: [],
-      annotations: {}
-    },
-    {
-      name: "list_invoices",
-      description: "List invoices.",
-      effect: "read",
-      method: "GET",
-      path: "/invoices",
-      inputSchema: { type: "object", properties: {}, additionalProperties: false },
-      bindings: {},
-      bodyMode: "none",
-      tenantParams: [],
-      annotations: { readOnlyHint: true }
-    }
-  ]
-};
+let fixture: GatewayFixture;
 
 async function boot(auditTarget: string): Promise<void> {
-  const serverDir = join(dir, "srv");
-  mkdirSync(serverDir, { recursive: true });
-  writeFileSync(join(serverDir, "tools.json"), JSON.stringify(TOOLS));
-  writeFileSync(
-    join(serverDir, "policy.yaml"),
-    [
-      "version: 1",
-      "defaults:",
-      "  mode: approve-writes",
-      "rules:",
-      "  - id: allow-reads",
-      '    match: "list_*"',
-      "    effect: read",
-      "    decision: allow",
-      "  - id: create-invoice",
-      "    match: create_invoice",
-      "    effect: write",
-      "    decision: approve",
-      "egress:",
-      '  allow: ["api.example.com"]',
-      "approvals:",
-      "  mode: cli",
-      `  store_path: ${join(dir, "approvals.sqlite")}`,
-      "audit:",
-      "  enabled: true",
-      `  path: ${auditTarget}`,
-      "  hash_chain: true",
-      ""
-    ].join("\n")
-  );
+  fixture = writeGatewayFixture(join(dir, "gw"), {
+    id: "srv",
+    mode: "approve-writes",
+    approvalsMode: "cli",
+    audit: true,
+    rules: [
+      "- id: allow-reads",
+      '  match: "list_*"',
+      "  effect: read",
+      "  decision: allow",
+      "- id: create-invoice",
+      "  match: create_invoice",
+      "  effect: write",
+      "  decision: approve"
+    ],
+    hashChain: true
+  });
+  // The audit path is what each case wants to point at, so it is rewritten
+  // rather than taken from the fixture's default.
+  writeFileSync(fixture.configPath, readFileSync(fixture.configPath, "utf8").replace(fixture.auditPath, auditTarget));
+
+  /*
+   * Stand in for a running gateway. The grant preview reads the published
+   * surface, so without this it would correctly report that a grant covers
+   * nothing -- which is the bug these cases would otherwise hide.
+   */
+  publishSurface(fixture, [
+    tool("create_invoice", {
+      effect: "write",
+      description: "Create an invoice.",
+      rawDescription: "Create an invoice.",
+      inputSchema: { type: "object", properties: { amount: { type: "integer" } }, additionalProperties: false }
+    }),
+    tool("list_invoices", { effect: "read", description: "List invoices.", rawDescription: "List invoices." })
+  ]);
 
   const registryPath = join(dir, "servers.json");
-  writeFileSync(
-    registryPath,
-    JSON.stringify({
-      version: 1,
-      servers: [{ id: "srv", kind: "generated", label: "S", dir: serverDir, added_at: new Date().toISOString() }]
-    })
-  );
+  writeFileSync(registryPath, JSON.stringify({ version: 1, servers: [fixture.entry] }));
 
   const make = (p: number) =>
     createConsoleServer({

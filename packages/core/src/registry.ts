@@ -14,40 +14,17 @@ import { expandPath } from "./policy.js";
 
 const ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 
-export const RegistryEntrySchema = z.discriminatedUnion("kind", [
-  z
-    .object({
-      id: z.string().regex(ID, "an id is lower-case letters, digits, dashes and underscores"),
-      kind: z.literal("generated"),
-      label: z.string().min(1),
-      /** Directory holding tools.json and policy.yaml. */
-      dir: z.string().min(1).optional(),
-      tools_path: z.string().min(1).optional(),
-      policy_path: z.string().min(1).optional(),
-      /** Overrides the audit `component` used to attribute records. */
-      component: z.string().min(1).optional(),
-      added_at: z.string()
-    })
-    .strict()
-    .superRefine((entry, ctx) => {
-      if (!entry.dir && !entry.tools_path) {
-        ctx.addIssue({ code: "custom", path: ["dir"], message: "set dir, or tools_path and policy_path" });
-      }
-      if (entry.dir && (entry.tools_path || entry.policy_path)) {
-        ctx.addIssue({ code: "custom", path: ["dir"], message: "set dir or the explicit paths, not both" });
-      }
-    }),
-  z
-    .object({
-      id: z.string().regex(ID, "an id is lower-case letters, digits, dashes and underscores"),
-      kind: z.literal("gateway"),
-      label: z.string().min(1),
-      config_path: z.string().min(1),
-      component: z.string().min(1).optional(),
-      added_at: z.string()
-    })
-    .strict()
-]);
+export const RegistryEntrySchema = z
+  .object({
+    id: z.string().regex(ID, "an id is lower-case letters, digits, dashes and underscores"),
+    kind: z.literal("gateway"),
+    label: z.string().min(1),
+    config_path: z.string().min(1),
+    /** Overrides the audit `component` used to attribute records. */
+    component: z.string().min(1).optional(),
+    added_at: z.string()
+  })
+  .strict();
 export type RegistryEntry = z.infer<typeof RegistryEntrySchema>;
 
 export const RegistrySchema = z
@@ -83,8 +60,52 @@ export class RegistryError extends Error {
   }
 }
 
+/**
+ * The entry kinds this build understands. An entry of any other kind is
+ * skipped rather than rejected -- see `parseRegistry`.
+ */
+const KNOWN_KINDS = new Set(["gateway"]);
+
+/**
+ * Drops entries whose `kind` this build does not understand.
+ *
+ * The registry is long-lived and shared between versions: `~/.hmcp/servers.json`
+ * outlives any one build, and it held `kind: "generated"` entries until the
+ * generator was removed. A strict parse of the whole file would make one stale
+ * entry hide every other server -- the console would come up with nothing and
+ * blame the file rather than the entry. So an unrecognised kind costs its own
+ * row and a line on stderr, not the registry.
+ *
+ * Note this is deliberately only about `kind`. An entry of a *known* kind that
+ * is malformed is still an error: that is a file someone wrote wrongly now,
+ * not one written correctly by a different version.
+ */
+function dropUnknownKinds(raw: unknown, source: string): unknown {
+  if (typeof raw !== "object" || raw === null) return raw;
+  const servers = (raw as { servers?: unknown }).servers;
+  if (!Array.isArray(servers)) return raw;
+
+  const kept: unknown[] = [];
+  const skipped: string[] = [];
+  for (const entry of servers) {
+    const kind = (entry as { kind?: unknown } | null)?.kind;
+    if (typeof kind === "string" && !KNOWN_KINDS.has(kind)) {
+      const id = (entry as { id?: unknown }).id;
+      skipped.push(`${typeof id === "string" ? id : "<no id>"} (kind "${kind}")`);
+      continue;
+    }
+    kept.push(entry);
+  }
+  if (skipped.length === 0) return raw;
+  process.stderr.write(
+    `hmcp: ignoring ${skipped.length} registry ${skipped.length === 1 ? "entry" : "entries"} ` +
+      `of an unknown kind in ${source}: ${skipped.join(", ")}\n`
+  );
+  return { ...(raw as object), servers: kept };
+}
+
 export function parseRegistry(raw: unknown, source = "<inline>"): Registry {
-  const result = RegistrySchema.safeParse(raw);
+  const result = RegistrySchema.safeParse(dropUnknownKinds(raw, source));
   if (!result.success) {
     const issues = result.error.issues.map((i) => ({ path: i.path.join(".") || "(root)", message: i.message }));
     throw new RegistryError(
@@ -113,19 +134,4 @@ export function writeRegistry(registry: Registry, path = defaultRegistryPath()):
   const tmp = join(dirname(full), `.${Date.now()}.servers.json.tmp`);
   writeFileSync(tmp, JSON.stringify(registry, null, 2) + "\n", { encoding: "utf8", mode: 0o600 });
   renameSync(tmp, full);
-}
-
-/** Where a generated entry's two files live. */
-export function generatedPaths(entry: RegistryEntry & { kind: "generated" }): {
-  toolsPath: string;
-  policyPath: string;
-} {
-  if (entry.dir) {
-    const dir = expandPath(entry.dir);
-    return { toolsPath: join(dir, "tools.json"), policyPath: join(dir, "policy.yaml") };
-  }
-  return {
-    toolsPath: expandPath(entry.tools_path!),
-    policyPath: expandPath(entry.policy_path ?? "policy.yaml")
-  };
 }

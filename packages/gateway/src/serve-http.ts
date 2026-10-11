@@ -12,6 +12,7 @@ import {
   parseExposureChange,
   readBody,
   tokenActor,
+  toolSurfaceOf,
   unprocessable,
   type ToolExposureRow
 } from "@hmcp/core";
@@ -249,18 +250,14 @@ export async function serveHttp(gateway: Gateway, options: ServeHttpOptions): Pr
 
     if (path === "tools") {
       if (req.method !== "GET") return methodNotAllowed(res, "GET");
-      const off = new Map(scoped.listDisabledTools().map((r) => [r.tool, r]));
+      /*
+       * The same join a console makes over the published rows, from the one
+       * shared implementation, so an operator asking the gateway directly and
+       * an operator looking at a console are told the same thing.
+       */
       sendJson(res, 200, {
         tenant,
-        tools: gateway.inventory().map((entry) => ({
-          name: entry.localName,
-          upstream: entry.upstream.spec.name,
-          effect: entry.effect ?? null,
-          effectSource: entry.effectSource,
-          hiddenByPolicy: entry.hidden,
-          injection: entry.injection?.patternIds ?? null,
-          disabled: describeRow(off.get(entry.localName))
-        }))
+        tools: toolSurfaceOf(gateway.inventoryInputs(), scoped.listDisabledTools())
       });
       return;
     }

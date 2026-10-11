@@ -14,23 +14,47 @@
  */
 export type Reach = "read-only" | "approve-writes" | "locked";
 
+/**
+ * A gateway's tool surface is published by a running process, so every number
+ * derived from it needs its provenance alongside. "No tools" and "we have not
+ * been told" are different claims and the console must not merge them.
+ */
+export interface Surface {
+  live: boolean;
+  stale: boolean;
+  neverPublished: boolean;
+  publishedAt: number | null;
+  toolCount: number;
+  injectionCount: number;
+  hiddenCount: number;
+  unclassifiedCount: number;
+}
+
 export interface ServerSummary {
   id: string;
-  kind: "generated" | "gateway";
+  kind: "gateway";
   label: string;
   ok: boolean;
   error?: string;
   component?: string;
-  api?: { title: string; baseUrl: string } | null;
+  /** The upstream MCP servers this gateway is configured to front. */
+  upstreams?: string[];
+  /** `null` when nothing has been published — not zero, which would be a claim. */
   toolCount?: number | null;
-  /** `defaults.mode` from policy.yaml: the fallback for an unmatched call. */
+  /** Which tenant `reach` describes, or null when a request must name one. */
+  tenantScope?: string | null;
+  tenantRequired?: boolean;
+  tenantHint?: string | null;
+  surfaceLive?: boolean;
+  surfaceStale?: boolean;
+  /** `defaults.mode` from the policy: the fallback for an unmatched call. */
   posture?: string;
-  /** What the model can actually reach, derived from every tool's verdict. */
-  reach?: Reach;
+  /** What the model can reach, or `null` when the surface is unknown. */
+  reach?: Reach | null;
+  /** Whether a gateway process is announcing itself for this component. */
+  running?: boolean;
   auditPath?: string;
   tenantError?: string | null;
-  counts?: Record<string, number>;
-  scanOk?: boolean;
 }
 
 export interface Finding {
@@ -44,10 +68,17 @@ export interface Finding {
 
 export interface ToolProtection {
   name: string;
+  /** What the model is told, after any rewriting of the upstream's own text. */
   description: string;
-  effect: string;
-  method: string;
-  path: string;
+  /** What the upstream said. Differs from `description` when it was rewritten. */
+  rawDescription: string;
+  upstream: string;
+  /** `null` when the gateway could not classify it, in which case it is refused. */
+  effect: string | null;
+  effectSource: string;
+  /** Hidden from every tenant by gateway policy, not by one tenant's switch. */
+  hiddenByPolicy: boolean;
+  injection: string[] | null;
   verdict: { kind: "allow" | "approve" | "deny"; ruleId: string; reason: string };
   verdictStage: string;
   reclassifiedTo: string | null;
@@ -66,20 +97,9 @@ export interface ToolProtection {
     type?: string;
     required: boolean;
     description?: string;
-    binding: { in: string; name: string } | null;
-    renamed: boolean;
-    isPaginationCap: boolean;
     constrainedByRule: string | null;
   }[];
-  withheldParams: { name: string; in?: string; reason: string }[];
-  tenantParams: { param: string; injectedInto: string[] }[];
-  paginationCap: { param: string; max: number } | null;
   schemaClosed: boolean;
-  review: string | null;
-  /** `specIndex` is absent on a tool generated before the field existed, and
-      on any surface that did not come from a spec. */
-  source: { operationId?: string; summary?: string; deprecated?: boolean; specIndex?: number } | null;
-  annotations: Record<string, boolean | undefined>;
   standingGrants: {
     grantId: string;
     reason: string;
@@ -89,7 +109,6 @@ export interface ToolProtection {
     maxUses: number | null;
     expiresAt: number;
   }[];
-  findings: Finding[];
   inputSchema?: unknown;
   activity?: AuditRecord[];
 }
@@ -105,9 +124,13 @@ export interface ServerProtection {
   id: string;
   label: string;
   kind: string;
-  api: { title: string; version: string; baseUrl: string } | null;
+  /** Which tenant every scoped number below describes. */
+  tenant_scope: string;
+  /** Whether the request named it, or the console read it from the config. */
+  explicitTenant: boolean;
   posture: string;
-  reach: Reach;
+  reach: Reach | null;
+  surface: Surface;
   onUnclassified: string;
   toolBudget: { budget: number; enabled: number; ok: boolean };
   rules: {
@@ -142,7 +165,6 @@ export interface ServerProtection {
     blockPrivateIps: boolean;
     allowHttp: boolean;
     allowIpLiterals: boolean;
-    baseUrlPermitted: boolean | null;
   };
   approvals: {
     mode: string;
@@ -169,17 +191,7 @@ export interface ServerProtection {
     policyApplied: boolean | null;
     policyPath: string | null;
   };
-  auth: { kind: string; envVar: string | null; envPresent: boolean | null };
-  generation: {
-    specFormat: string | null;
-    hasSecuritySchemes: boolean | null;
-    operationsWithoutSecurity: string[];
-    skipped: { tool: string; reason: string }[];
-  } | null;
   pipeline: PipelineStep[];
-  findings: Finding[];
-  counts: Record<string, number>;
-  scanOk: boolean;
   tools: ToolProtection[];
 }
 
@@ -257,6 +269,9 @@ export interface RedactionMeta {
   markers: { marker: string; meaning: string }[];
   note: string;
   grantTtlMaxSeconds: number;
+  /** Core's decision and outcome vocabularies, so the filters are not a copy. */
+  decisions: { value: string; label: string }[];
+  outcomes: { value: string; label: string }[];
 }
 
 export class ApiError extends Error {
@@ -290,6 +305,32 @@ async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
   return body as T;
 }
 
+/**
+ * Appends the tenant, when one is being named.
+ *
+ * Omitted rather than sent empty when it is not, because the two mean
+ * different things to the backend: absent lets a single-tenant gateway resolve
+ * its own, while a value names one explicitly. A hosted gateway, which resolves
+ * per request from the caller's token, refuses the absent case outright rather
+ * than guessing — so a page that forgets this gets an error it can show, not a
+ * silently wrong scope.
+ */
+function scoped(path: string, tenant?: string | null): string {
+  if (!tenant) return path;
+  const sep = path.includes("?") ? "&" : "?";
+  return `${path}${sep}tenant=${encodeURIComponent(tenant)}`;
+}
+
+export interface TenantInfo {
+  tenants: string[];
+  configured: boolean;
+  sourceKind: string | null;
+  required: boolean;
+  /** Null when a request has to name one. */
+  assumed: string | null;
+  whyNotAssumed: string | null;
+}
+
 export const api = {
   /** Exchanges the token in the startup URL for a session cookie. */
   session: (token: string) => call<{ ok: true }>("/api/v1/session", { method: "POST", body: JSON.stringify({ token }) }),
@@ -298,35 +339,54 @@ export const api = {
   addServer: (entry: Record<string, unknown>) =>
     call<{ id: string }>("/api/v1/servers", { method: "POST", body: JSON.stringify(entry) }),
   removeServer: (id: string) => call<{ removed: string }>(`/api/v1/servers/${id}`, { method: "DELETE" }),
-  protection: (id: string) => call<ServerProtection>(`/api/v1/servers/${id}/protection`),
-  tools: (id: string) => call<ToolProtection[]>(`/api/v1/servers/${id}/tools`),
-  tool: (id: string, name: string) => call<ToolProtection>(`/api/v1/servers/${id}/tools/${encodeURIComponent(name)}`),
+  tenants: (id: string) => call<TenantInfo>(`/api/v1/servers/${id}/tenants`),
+  protection: (id: string, tenant?: string | null) =>
+    call<ServerProtection>(scoped(`/api/v1/servers/${id}/protection`, tenant)),
+  tools: (id: string, tenant?: string | null) =>
+    call<ToolProtection[]>(scoped(`/api/v1/servers/${id}/tools`, tenant)),
+  tool: (id: string, name: string, tenant?: string | null) =>
+    call<ToolProtection>(scoped(`/api/v1/servers/${id}/tools/${encodeURIComponent(name)}`, tenant)),
   /**
    * Switches one tool off, or hands it back to policy. `disabled: false` only
    * clears the override — it cannot expose a tool that policy refuses.
    */
-  setExposure: (id: string, name: string, disabled: boolean, reason = "") =>
-    call<{ tool: ToolProtection; changed: boolean; warning: string | null }>(
-      `/api/v1/servers/${id}/tools/${encodeURIComponent(name)}/exposure`,
-      { method: "PUT", body: JSON.stringify({ disabled, reason }) }
-    ),
-  pending: (id: string) => call<Approval[]>(`/api/v1/servers/${id}/approvals/pending`),
-  approvals: (id: string) => call<Approval[]>(`/api/v1/servers/${id}/approvals`),
-  decide: (id: string, aprId: string, state: "granted" | "denied", note: string) =>
-    call<Approval>(`/api/v1/servers/${id}/approvals/${aprId}/decide`, {
+  setExposure: (id: string, name: string, disabled: boolean, reason = "", tenant?: string | null) =>
+    call<{
+      tool: ToolProtection;
+      changed: boolean;
+      warning: string | null;
+      /** Which scope the switch landed in, so it can be shown rather than assumed. */
+      tenant: string;
+      explicitTenant: boolean;
+    }>(scoped(`/api/v1/servers/${id}/tools/${encodeURIComponent(name)}/exposure`, tenant), {
+      method: "PUT",
+      body: JSON.stringify({ disabled, reason })
+    }),
+  pending: (id: string, tenant?: string | null) =>
+    call<Approval[]>(scoped(`/api/v1/servers/${id}/approvals/pending`, tenant)),
+  approvals: (id: string, tenant?: string | null) =>
+    call<Approval[]>(scoped(`/api/v1/servers/${id}/approvals`, tenant)),
+  decide: (id: string, aprId: string, state: "granted" | "denied", note: string, tenant?: string | null) =>
+    call<Approval>(scoped(`/api/v1/servers/${id}/approvals/${aprId}/decide`, tenant), {
       method: "POST",
       body: JSON.stringify({ state, note })
     }),
-  grants: (id: string) => call<Grant[]>(`/api/v1/servers/${id}/grants`),
-  createGrant: (id: string, body: Record<string, unknown>) =>
-    call<Grant>(`/api/v1/servers/${id}/grants`, { method: "POST", body: JSON.stringify(body) }),
-  previewGrant: (id: string, body: Record<string, unknown>) =>
-    call<{ expiresAt: number; tools: { name: string; effect: string; covers: boolean; why: string }[] }>(
-      `/api/v1/servers/${id}/grants/preview`,
-      { method: "POST", body: JSON.stringify(body) }
-    ),
-  revokeGrant: (id: string, grantId: string) =>
-    call<Grant>(`/api/v1/servers/${id}/grants/${grantId}`, { method: "DELETE" }),
+  grants: (id: string, tenant?: string | null) => call<Grant[]>(scoped(`/api/v1/servers/${id}/grants`, tenant)),
+  createGrant: (id: string, body: Record<string, unknown>, tenant?: string | null) =>
+    call<Grant>(scoped(`/api/v1/servers/${id}/grants`, tenant), { method: "POST", body: JSON.stringify(body) }),
+  previewGrant: (id: string, body: Record<string, unknown>, tenant?: string | null) =>
+    call<{
+      expiresAt: number;
+      /** False when no live gateway has published a surface to check against. */
+      surfaceKnown: boolean;
+      surfaceUnknownWhy: string | null;
+      tools: { name: string; effect: string | null; covers: boolean; why: string }[];
+    }>(scoped(`/api/v1/servers/${id}/grants/preview`, tenant), {
+      method: "POST",
+      body: JSON.stringify(body)
+    }),
+  revokeGrant: (id: string, grantId: string, tenant?: string | null) =>
+    call<Grant>(scoped(`/api/v1/servers/${id}/grants/${grantId}`, tenant), { method: "DELETE" }),
   audit: (id: string, params: Record<string, string>) =>
     call<AuditPage>(`/api/v1/servers/${id}/audit?${new URLSearchParams(params)}`),
   verify: (id: string) =>

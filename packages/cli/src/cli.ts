@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { Command } from "commander";
 import { parse as parseYaml } from "yaml";
@@ -15,13 +15,12 @@ import {
   type ApprovalRow,
   type Policy
 } from "@hmcp/core";
-import { scan, toMarkdown, toSarif, toText, type ScanTool } from "@hmcp/scanner";
 
 const program = new Command();
 
 program
   .name("hmcp")
-  .description("Review approvals, verify the audit trail, and scan a hardened MCP server.")
+  .description("Review approvals and verify the audit trail of a hardened MCP gateway.")
   .version("0.1.0");
 
 /* ------------------------------------------------------------------ approvals */
@@ -232,77 +231,6 @@ audit
     });
   });
 
-/* ----------------------------------------------------------------------- scan */
-
-program
-  .command("scan")
-  .description("Scan a generated server's tools.json against its policy.")
-  .option("-t, --tools <file>", "tool descriptor file", "tools.json")
-  .option("-p, --policy <file>", "policy file", "policy.yaml")
-  .option("--sarif <file>", "also write SARIF")
-  .option("--md <file>", "also write markdown")
-  .option("--baseline <file>", "accept findings recorded in this baseline")
-  .option("--allow-high", "exit 0 even with a high-severity finding", false)
-  .action((options) => {
-    run(() => {
-      const toolsPath = resolve(options.tools as string);
-      if (!existsSync(toolsPath)) throw new CliError(`no tool descriptor file at ${toolsPath}`);
-
-      const descriptor = JSON.parse(readFileSync(toolsPath, "utf8")) as {
-        api?: { title?: string; base_url?: string };
-        tools?: {
-          name: string;
-          description?: string;
-          effect?: ScanTool["effect"];
-          method?: string;
-          path?: string;
-          inputSchema?: unknown;
-          tenantParams?: string[];
-          paginationCap?: unknown;
-        }[];
-      };
-
-      const policy = existsSync(resolve(options.policy as string))
-        ? loadPolicy(options.policy as string)
-        : defaultPolicy();
-
-      const tools: ScanTool[] = (descriptor.tools ?? []).map((t) => ({
-        name: t.name,
-        description: t.description ?? "",
-        effect: t.effect,
-        method: t.method,
-        path: t.path,
-        inputSchema: t.inputSchema,
-        tenantParams: t.tenantParams,
-        hasPaginationCap: t.paginationCap !== undefined
-      }));
-
-      const result = scan(
-        {
-          kind: "generated",
-          file: options.tools as string,
-          policy,
-          tools,
-          api: descriptor.api?.base_url
-            ? { title: descriptor.api.title ?? "api", base_url: descriptor.api.base_url }
-            : undefined
-        },
-        { baseline: readBaseline(options.baseline as string | undefined) }
-      );
-
-      process.stdout.write(toText(result, toolsPath));
-      if (options.sarif) {
-        writeFileSync(resolve(options.sarif as string), toSarif(result, toolsPath), "utf8");
-        log(`SARIF written to ${options.sarif}`);
-      }
-      if (options.md) {
-        writeFileSync(resolve(options.md as string), toMarkdown(result, toolsPath), "utf8");
-        log(`Markdown written to ${options.md}`);
-      }
-      if (!result.ok && !options.allowHigh) process.exitCode = 1;
-    });
-  });
-
 /* ---------------------------------------------------------------------- policy */
 
 program
@@ -349,13 +277,6 @@ function openStore(options: Record<string, unknown>): ApprovalStore {
 function auditPath(options: Record<string, unknown>): string {
   const override = options["file"] as string | undefined;
   return expandPath(override ?? resolvePolicy(options).audit.path);
-}
-
-function readBaseline(path: string | undefined) {
-  if (!path) return undefined;
-  const full = resolve(path);
-  if (!existsSync(full)) throw new CliError(`no baseline file at ${full}`);
-  return JSON.parse(readFileSync(full, "utf8")) as never;
 }
 
 function actor(): string {

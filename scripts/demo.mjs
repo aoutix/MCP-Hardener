@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 /*
  * One command that brings the whole thing up with something to look at:
- * generates a server from the example spec, registers it alongside a gateway,
- * puts real rows in the approval queue and the audit log, then starts the
- * console and prints the URL.
+ * registers a gateway over a real upstream MCP server, puts real rows in the
+ * approval queue and the audit log, then starts the console and prints the URL
+ * with the gateway still running behind it.
  *
  *   npm run demo              set up if needed, then serve
  *   npm run demo -- --reset   throw the state away and build it again
@@ -14,11 +14,16 @@
  * registry, its approvals and an audit log of real calls, and a demo that
  * seeds fake approvals into it would be writing fiction into that record.
  *
- * The seeding drives the generated server over stdio MCP and calls its tools,
- * rather than writing rows into the store directly. It is slower and it is the
- * point: every row on the Approvals page got there through `decide()`, carries
- * a real argument binding, and has the audit records to match. A demo that
- * faked them would be demonstrating the UI and not the enforcement.
+ * The seeding drives the gateway over stdio MCP and calls its tools, rather
+ * than writing rows into the store directly. It is slower and it is the point:
+ * every row on the Approvals page got there through `decide()`, carries a real
+ * argument binding, and has the audit records to match. A demo that faked them
+ * would be demonstrating the UI and not the enforcement.
+ *
+ * The gateway is then left running while the console serves, because a
+ * gateway's tool surface is something a *live* process publishes. With nothing
+ * running the console would correctly report that it cannot confirm the tool
+ * list, and the kill switch would correctly refuse to write against it.
  */
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
@@ -88,14 +93,11 @@ const paths = {
   registry: join(home, "servers.json"),
   store: join(home, "approvals.sqlite"),
   audit: join(home, "audit.jsonl"),
-  manifest: join(home, "billing.manifest.yaml"),
-  billingPolicy: join(home, "billing-policy.yaml"),
-  billing: join(home, "billing"),
   gatewayPolicy: join(home, "gateway-policy.yaml"),
   gateway: join(home, "gateway.yaml")
 };
 
-const step = (n, name, detail) => process.stdout.write(`  ${n}/5  ${name.padEnd(10)} ${detail}\n`);
+const step = (n, name, detail) => process.stdout.write(`  ${n}/4  ${name.padEnd(10)} ${detail}\n`);
 const note = (text) => process.stdout.write(`       ${text}\n`);
 
 function fail(message) {
@@ -126,9 +128,7 @@ mkdirSync(paths.home, { recursive: true });
 
 const builtPaths = [
   "packages/core/dist/index.js",
-  "packages/runtime/dist/index.js",
   "packages/scanner/dist/index.js",
-  "packages/generator/dist/cli.js",
   "packages/gateway/dist/cli.js",
   "packages/web/dist/cli.js",
   "packages/web/dist-ui/index.html"
@@ -150,15 +150,15 @@ if (missing.length > 0 && opts.build) {
   step(1, "build", "already built");
 }
 
-/* --------------------------------------------------------------- 2. generate */
+/* ------------------------------------------------------------ demo policy */
 
 /*
- * The demo's policy is the example's, with the three paths that decide *where
+ * The demo's policy is the example's, with the two paths that decide *where
  * state lands* pointed into `.demo/` and the approval TTL widened. Rewritten
  * through the YAML parser rather than by text substitution so a change to the
  * example's formatting cannot silently stop redirecting the audit log.
  *
- * The TTL is the one rule worth knowing about: the example sets 180 seconds,
+ * The TTL is the one rule worth knowing about: the example sets 300 seconds,
  * which is a sound thing for a real deployment to do and useless here, because
  * the rows expire while you are still reading the page they are on.
  */
@@ -183,85 +183,36 @@ function demoPolicy(sourcePath, outPath, { ttl }) {
 }
 
 const ttl = 60 * 60 * 8;
-demoPolicy(join(root, "examples/billing/policy.yaml"), paths.billingPolicy, { ttl });
 
-if (!existsSync(join(paths.billing, "tools.json")) || opts.reset) {
-  const planned = await run("node", [
-    "packages/generator/dist/cli.js",
-    "plan",
-    "examples/billing/openapi.yaml",
-    "-p",
-    paths.billingPolicy,
-    "-o",
-    paths.manifest,
-    // Writes are off by default and the manifest is where a human turns them
-    // on. The demo needs the write path populated, so it enables them here —
-    // which is the one curation decision it makes on your behalf.
-    "--enable",
-    "read",
-    "write"
-  ]);
-  if (planned.code !== 0) {
-    process.stderr.write(planned.out);
-    fail("hmcp-gen plan failed");
-  }
-
-  const built = await run("node", [
-    "packages/generator/dist/cli.js",
-    "build",
-    "-m",
-    paths.manifest,
-    "-p",
-    paths.billingPolicy,
-    "-o",
-    paths.billing,
-    // So the emitted package.json points at this checkout rather than at a
-    // version on npm, and the generated server is runnable after an install.
-    "--runtime",
-    `file:${join(root, "packages/runtime")}`
-  ]);
-
-  /*
-   * A non-zero exit here is the example working as intended, not a failure.
-   * `examples/billing` is a deliberately hostile spec — a live-looking Stripe
-   * key and two prompt injections in its descriptions — so the self-scan finds
-   * high-severity problems and refuses to bless the output. The files are
-   * written anyway, which is what lets the demo carry on and what lets you see
-   * the findings on the Protection page.
-   */
-  const findings = /(\d+) high, (\d+) medium/.exec(built.out);
-  if (!existsSync(join(paths.billing, "tools.json"))) {
-    process.stderr.write(built.out);
-    fail("hmcp-gen build wrote no tools.json");
-  }
-  step(2, "generate", `billing → ${rel(paths.billing)}${findings ? ` · scan: ${findings[0]}` : ""}`);
-  if (built.code !== 0) {
-    note(`the build exited ${built.code}: the example spec is hostile on purpose and the scan says so.`);
-    note(`the files were written regardless — see Protection in the console for each finding.`);
-  }
-} else {
-  step(2, "generate", `billing already generated in ${rel(paths.billing)}`);
-}
-
-/* --------------------------------------------------------------- 3. register */
+/* --------------------------------------------------------------- 2. register */
 
 /*
- * Both kinds of server, because they are the two halves of the project and the
- * console renders them differently: a generated server has a tool surface the
- * console can show and switch off, while a gateway's surface belongs to its
- * upstreams and is discovered when it connects, so the console deliberately
- * declines to guess at it.
+ * One gateway, over an upstream MCP server that actually exists and can be
+ * called. `mock-upstream.mjs` is the gateway tests' own fixture: a real MCP
+ * server that deliberately advertises a tool whose description carries a
+ * prompt-injection payload, and a delete tool that claims to be read-only.
+ * Both are what the gateway is for, so the demo shows them rather than a
+ * well-behaved stub.
  *
- * Registering the gateway costs nothing offline — the console's gateway probe
- * stops at the config and never spawns an upstream.
+ * Registering costs nothing offline — the console's gateway probe stops at the
+ * config and never spawns an upstream.
  */
 demoPolicy(join(root, "examples/gateway/policy.yaml"), paths.gatewayPolicy, { ttl });
 const gatewayConfig = parseYaml(readFileSync(join(root, "examples/gateway/gateway.yaml"), "utf8"));
 gatewayConfig.policy = paths.gatewayPolicy;
+gatewayConfig.upstreams = [
+  {
+    name: "notes",
+    transport: "stdio",
+    command: process.execPath,
+    args: [join(root, "packages/gateway/test/fixtures/mock-upstream.mjs")],
+    pass_env: []
+  }
+];
 writeFileSync(
   paths.gateway,
   `# Generated by scripts/demo.mjs from examples/gateway/gateway.yaml, with the\n` +
-    `# policy path pointed at the demo's copy. Rewritten on every run.\n\n` +
+    `# policy path and the upstream pointed at the demo's own. Rewritten on every run.\n\n` +
     stringifyYaml(gatewayConfig)
 );
 
@@ -271,13 +222,6 @@ writeFileSync(
     {
       version: 1,
       servers: [
-        {
-          id: "billing",
-          kind: "generated",
-          label: "Billing",
-          dir: paths.billing,
-          added_at: new Date().toISOString()
-        },
         {
           id: "notes",
           kind: "gateway",
@@ -291,23 +235,28 @@ writeFileSync(
     2
   ) + "\n"
 );
-step(3, "register", "billing (generated) · notes (gateway)");
+step(2, "register", "notes (gateway over a local MCP upstream)");
 
-/* ------------------------------------------------------------------- 4. seed */
+/* ------------------------------------------------------------------- 3. seed */
 
-/** One JSON-RPC conversation with a freshly spawned generated server. */
-async function driveServer(calls) {
-  const child = spawn(process.execPath, [join(root, "scripts/demo-server.mjs")], {
-    cwd: root,
-    env: {
-      ...process.env,
-      BILLING_ORG_ID: process.env["BILLING_ORG_ID"] ?? "org_demo",
-      HMCP_SERVER_DIR: paths.billing,
-      HMCP_POLICY: paths.billingPolicy,
-      HMCP_ACTOR: process.env["HMCP_ACTOR"] ?? "demo"
-    },
-    stdio: ["pipe", "pipe", "pipe"]
-  });
+/**
+ * One JSON-RPC conversation with a gateway over stdio.
+ *
+ * `keepAlive` leaves the child running and hands it back, which is how the
+ * console step gets a gateway that is still announcing itself. A gateway's tool
+ * surface is published by a live process, so a demo that killed it here would
+ * show a console that cannot confirm its own tool list.
+ */
+async function driveGateway(calls, { keepAlive = false } = {}) {
+  const child = spawn(
+    process.execPath,
+    [join(root, "packages/gateway/dist/cli.js"), "serve", "--config", paths.gateway],
+    {
+      cwd: root,
+      env: { ...process.env, HMCP_ACTOR: process.env["HMCP_ACTOR"] ?? "demo" },
+      stdio: ["pipe", "pipe", "pipe"]
+    }
+  );
 
   let stderr = "";
   child.stderr.on("data", (d) => (stderr += d));
@@ -336,7 +285,7 @@ async function driveServer(calls) {
 
   const exited = new Promise((_, reject) =>
     child.on("close", (code) => {
-      if (code !== 0 && waiting.size > 0) reject(new Error(stderr.trim() || `server exited ${code}`));
+      if (code !== 0 && waiting.size > 0) reject(new Error(stderr.trim() || `gateway exited ${code}`));
     })
   );
 
@@ -352,6 +301,7 @@ async function driveServer(calls) {
     ]);
   };
 
+  let ok = false;
   try {
     await send("initialize", {
       protocolVersion: "2025-06-18",
@@ -360,24 +310,23 @@ async function driveServer(calls) {
     });
     child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`);
     for (const [name, args] of calls) await send("tools/call", { name, arguments: args });
+    ok = true;
   } finally {
-    child.kill();
+    if (!keepAlive || !ok) child.kill();
   }
+  return keepAlive && ok ? child : undefined;
 }
 
 if (opts.seed) {
-  const policy = loadPolicy(paths.billingPolicy);
-  const db = new ApprovalStore(paths.store, paths.billing);
+  const policy = loadPolicy(paths.gatewayPolicy);
+  const db = new ApprovalStore(paths.store, root);
   /*
-   * The rows the generated Billing server itself would write and read: its
-   * component, and the tenant BILLING_ORG_ID resolves to. Seeding into any
-   * other scope would put rows in the database that the server cannot see and
-   * the console would not show.
+   * The rows the gateway itself writes and reads: its component, and no tenant,
+   * because the example policy configures none. Seeding into any other scope
+   * would put rows in the database that the gateway cannot see and the console
+   * would not show.
    */
-  const store = db.scoped({
-    component: "generated:Billing",
-    tenant: process.env["BILLING_ORG_ID"] ?? "org_demo"
-  });
+  const store = db.scoped({ component: "gateway:hmcp-gateway", tenant: "" });
   db.expireStale();
   const already = store.listPending(100).length;
 
@@ -389,63 +338,54 @@ if (opts.seed) {
     "Umbrella — support retainer",
     "Soylent — migration, phase 2"
   ];
-  const amounts = [2400, 18900, 47500, 650, 9900, 31200];
 
   const calls = [];
   for (let i = 0; i < Math.max(0, wantPending - already); i += 1) {
-    calls.push([
-      "create_invoice",
-      { amount: amounts[i % amounts.length], currency: "usd", memo: memos[i % memos.length] }
-    ]);
+    calls.push(["notes__create_note", { body: memos[i % memos.length] }]);
   }
 
   /*
    * A few calls that are *not* held, so the audit log shows the whole range of
-   * verdicts rather than a column of identical holds. The reads are allowed and
-   * then fail at the egress step, because the example's upstream host is
-   * fictional — the decision is recorded before the request is built, which is
-   * exactly the distinction the Protection page makes.
+   * verdicts rather than a column of identical holds.
    */
   if (already === 0) {
     calls.push(
-      // `list_customers` takes nothing: its pagination and tenant parameters
-      // were both withheld from the agent-facing schema.
-      ["list_customers", {}],
-      ["get_invoice", { invoice_id: "in_demo_001" }],
-      // Denied outright by the `no-transfers` rule.
-      ["create_transfer", { amount: 5000, destination: "acct_demo" }],
-      // Allowed by the rule but refused by its argument bounds, before a human
-      // is ever asked: the cap is 50000.
-      ["create_invoice", { amount: 90000, currency: "usd", memo: "over the amount cap" }],
-      // Same, on the currency enum.
-      ["create_invoice", { amount: 1200, currency: "eur", memo: "non-usd currency" }]
+      // Allowed outright by `allow-reads`.
+      ["notes__get_note", { id: "n1" }],
+      // Refused by `refuse-deletes`, despite the upstream claiming the tool is
+      // read-only — a dishonest annotation the gateway does not take at face
+      // value.
+      ["notes__delete_note", { id: "n1" }],
+      // No such tool. Refused identically to one that policy hides, so probing
+      // cannot tell the two apart.
+      ["notes__purge_everything", {}]
     );
   }
 
   if (calls.length > 0) {
     try {
-      await driveServer(calls);
+      await driveGateway(calls);
     } catch (err) {
       db.close();
-      fail(`could not drive the generated server: ${err.message}`);
+      fail(`could not drive the gateway: ${err.message}`);
     }
   }
 
   /*
-   * A standing grant, so the Pre-approvals page has something in it. Bounded at
-   * 100 units deliberately: none of the seeded invoices match it, so they still
-   * go to a human. That is the documented behaviour worth seeing — a grant whose
-   * bounds reject the arguments is not a match, and a narrow pre-approval can
-   * never *block* a call you would otherwise have been asked about.
+   * A standing grant, so the Pre-approvals page has something in it. Bounded to
+   * a body that none of the seeded notes match, so they still go to a human.
+   * That is the documented behaviour worth seeing — a grant whose bounds reject
+   * the arguments is not a match, and a narrow pre-approval can never *block* a
+   * call you would otherwise have been asked about.
    */
   let grants = store.listGrants({ activeOnly: true, limit: 10 }).length;
   if (grants === 0) {
     const grant = store.createGrant({
-      tool_match: "create_invoice",
+      tool_match: "notes__create_*",
       effect: "write",
-      constraints: { amount: { min: 1, max: 100 }, currency: { enum: ["usd"] } },
+      constraints: { body: { maxLength: 8 } },
       max_uses: 5,
-      reason: "trivial USD invoices during the demo, 5 uses",
+      reason: "very short notes during the demo, 5 uses",
       created_by: process.env["HMCP_ACTOR"] ?? "demo",
       expires_at: Date.now() + 7 * 24 * 60 * 60 * 1000
     });
@@ -457,7 +397,7 @@ if (opts.seed) {
         config: policy.audit,
         actor: process.env["HMCP_ACTOR"] ?? "demo",
         component: "hmcp-web",
-        cwd: paths.billing
+        cwd: root
       }).appendStrict({
         tool: grant.tool_match,
         effect: grant.effect,
@@ -472,7 +412,7 @@ if (opts.seed) {
         args_redacted: {
           tool_match: grant.tool_match,
           effect: grant.effect,
-          constraints: { amount: { min: 1, max: 100 }, currency: { enum: ["usd"] } },
+          constraints: { body: { maxLength: 8 } },
           max_uses: grant.max_uses,
           expires_at: grant.expires_at
         }
@@ -492,34 +432,45 @@ if (opts.seed) {
     ? readFileSync(paths.audit, "utf8").split("\n").filter(Boolean).length
     : 0;
   step(
-    4,
+    3,
     "seed",
     `${pending} pending (${total} rows in all) · ${grants} standing grant · ${auditLines} audit records`
   );
 } else {
-  step(4, "seed", "skipped (--no-seed)");
+  step(3, "seed", "skipped (--no-seed)");
 }
 
-/* ---------------------------------------------------------------- 5. console */
+/* ---------------------------------------------------------------- 4. console */
 
 if (!opts.console) {
-  step(5, "console", "skipped (--no-console)");
+  step(4, "console", "skipped (--no-console)");
   process.stdout.write(
     `\nState is ready in ${rel(paths.home)}. Serve it with:\n` +
-      `  BILLING_ORG_ID=org_demo node packages/web/dist/cli.js --registry ${rel(paths.registry)}\n\n`
+      `  node packages/web/dist/cli.js --registry ${rel(paths.registry)}\n\n` +
+      `Start the gateway too, or the console will say it cannot confirm the tool list:\n` +
+      `  node packages/gateway/dist/cli.js serve --config ${rel(paths.gateway)}\n\n`
   );
   process.exit(0);
 }
 
-step(5, "console", `starting on port ${port}`);
+/*
+ * A gateway left running behind the console, because the tool surface the
+ * console shows is something a live process publishes. Without this the
+ * Functions page would correctly report that it cannot confirm what is being
+ * served, and the kill switch would correctly refuse to write against an
+ * unconfirmed list — both right, and both a confusing first impression.
+ */
+let gatewayProcess;
+try {
+  gatewayProcess = await driveGateway([], { keepAlive: true });
+  step(4, "gateway", "running, publishing its tool surface");
+} catch (err) {
+  note(`the gateway could not be started, so the console will show no tools: ${err.message}`);
+}
+
+step(4, "console", `starting on port ${port}`);
 process.stdout.write("\n");
 
-/*
- * `BILLING_ORG_ID` is not optional. The example policy sets `tenant.required`
- * sourced from that variable, so without it every tool is denied, the console
- * reports that tenant scoping resolved to nothing, and the server's reach
- * collapses to `locked` — correct behaviour that looks exactly like a bug.
- */
 const consoleProcess = spawn(
   process.execPath,
   [join(root, "packages/web/dist/cli.js"), "--registry", paths.registry, "--port", String(port)],
@@ -527,14 +478,19 @@ const consoleProcess = spawn(
     cwd: root,
     env: {
       ...process.env,
-      BILLING_ORG_ID: process.env["BILLING_ORG_ID"] ?? "org_demo",
       HMCP_ACTOR: process.env["HMCP_ACTOR"] ?? "demo"
     },
     stdio: "inherit"
   }
 );
 
-const stop = () => consoleProcess.kill();
+const stop = () => {
+  gatewayProcess?.kill();
+  consoleProcess.kill();
+};
 process.on("SIGINT", stop);
 process.on("SIGTERM", stop);
-consoleProcess.on("close", (code) => process.exit(code ?? 0));
+consoleProcess.on("close", (code) => {
+  gatewayProcess?.kill();
+  process.exit(code ?? 0);
+});

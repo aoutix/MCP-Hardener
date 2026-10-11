@@ -23,8 +23,22 @@ import {
  * point: a decision to stop reviewing something is itself an event worth
  * recording.
  */
-export function Audit({ serverId }: { serverId: string }) {
-  const [filters, setFilters] = useState({ decision: "", outcome: "", tool: "", noteworthy: false });
+export function Audit({ serverId, tenant }: { serverId: string; tenant: string | null }) {
+  const [filters, setFilters] = useState({
+    decision: "",
+    outcome: "",
+    tool: "",
+    actor: "",
+    noteworthy: false,
+    /*
+     * One log file holds every tenant's records — the hash chain is per file,
+     * so splitting it is not free — which makes the filter the only way to
+     * read one customer's history out of it. Scoped by default, because a
+     * reviewer looking at a tenant's approvals should not be shown another
+     * tenant's calls in the same breath.
+     */
+    allTenants: false
+  });
   const [cursor, setCursor] = useState<number | undefined>();
   const [pages, setPages] = useState<AuditRecord[]>([]);
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -33,11 +47,17 @@ export function Audit({ serverId }: { serverId: string }) {
   if (filters.decision) params["decision"] = filters.decision;
   if (filters.outcome) params["outcome"] = filters.outcome;
   if (filters.tool) params["tool"] = filters.tool;
+  if (filters.actor) params["actor"] = filters.actor;
   if (filters.noteworthy) params["noteworthy"] = "1";
+  // An empty `tenant` is meaningful — it selects the records carrying none —
+  // so the parameter is only sent when a tenant is actually being scoped to.
+  if (!filters.allTenants && tenant !== null) params["tenant"] = tenant;
   if (cursor !== undefined) params["cursor"] = String(cursor);
 
   const page = useResource(() => api.audit(serverId, params), [serverId, JSON.stringify(params)]);
   const verify = useResource(() => api.verify(serverId), [serverId]);
+  /* The decision and outcome vocabularies, rather than a copy of core's enums. */
+  const meta = useResource(() => api.redaction(), []);
 
   // Paging appends; changing a filter starts over.
   const records = cursor === undefined ? (page.data?.records ?? []) : [...pages, ...(page.data?.records ?? [])];
@@ -79,7 +99,7 @@ export function Audit({ serverId }: { serverId: string }) {
           <input
             value={filters.tool}
             onChange={(e) => changeFilter({ tool: e.target.value })}
-            placeholder="Tool glob, e.g. create_*"
+            placeholder="Tool name or glob"
             className="mono min-w-44 flex-1 rounded-md border border-edge bg-surface px-2 py-1.5 text-sm"
           />
           <select
@@ -88,9 +108,11 @@ export function Audit({ serverId }: { serverId: string }) {
             className="rounded-md border border-edge bg-surface px-2 py-1.5 text-sm"
           >
             <option value="">any decision</option>
-            <option value="allow">allowed</option>
-            <option value="approve">approved</option>
-            <option value="deny">denied</option>
+            {(meta.data?.decisions ?? []).map((d) => (
+              <option key={d.value} value={d.value}>
+                {d.label}
+              </option>
+            ))}
           </select>
           <select
             value={filters.outcome}
@@ -98,11 +120,18 @@ export function Audit({ serverId }: { serverId: string }) {
             className="rounded-md border border-edge bg-surface px-2 py-1.5 text-sm"
           >
             <option value="">any outcome</option>
-            <option value="completed">completed</option>
-            <option value="denied">denied</option>
-            <option value="pending-approval">held for approval</option>
-            <option value="error">error</option>
+            {(meta.data?.outcomes ?? []).map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
           </select>
+          <input
+            value={filters.actor}
+            onChange={(e) => changeFilter({ actor: e.target.value })}
+            placeholder="Actor, e.g. token:svc-billing"
+            className="mono min-w-44 flex-1 rounded-md border border-edge bg-surface px-2 py-1.5 text-sm"
+          />
           <label className="flex items-center gap-1.5 text-sm">
             <input
               type="checkbox"
@@ -111,6 +140,19 @@ export function Audit({ serverId }: { serverId: string }) {
             />
             only refused or incomplete
           </label>
+          {tenant !== null && (
+            <label
+              className="flex items-center gap-1.5 text-sm"
+              title={`Unchecked, only ${tenant === "" ? "records carrying no tenant" : tenant}'s records are shown.`}
+            >
+              <input
+                type="checkbox"
+                checked={filters.allTenants}
+                onChange={(e) => changeFilter({ allTenants: e.target.checked })}
+              />
+              every tenant
+            </label>
+          )}
           <Button onClick={page.reload}>Refresh</Button>
         </div>
       </Panel>

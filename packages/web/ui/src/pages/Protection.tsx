@@ -8,24 +8,24 @@ import {
   Mono,
   Panel,
   ReachBadge,
-  SeverityBadge,
   Tag,
   VerdictBadge,
   bytes,
+  relativeTime,
   useResource
 } from "../components";
 
 /**
- * Part 4: how this server is being protected.
+ * Part 4: how this gateway is being protected.
  *
- * Every number, host, path and verdict on this page is read from this server's
- * own tools.json and policy.yaml, or computed by the same functions the runtime
- * uses. The only prose written ahead of time is the pipeline description, which
- * describes the runtime's code rather than the user's configuration, and each
- * of its steps cites the file it corresponds to.
+ * Every number, host and verdict on this page is read from this gateway's own
+ * configuration and the surface it published, or computed by the same functions
+ * the gateway uses to decide a call. The only prose written ahead of time is
+ * the pipeline description, which describes the gateway's code rather than the
+ * user's configuration, and each of its steps cites the file it corresponds to.
  */
-export function Protection({ serverId }: { serverId: string }) {
-  const { data, error, loading } = useResource(() => api.protection(serverId), [serverId]);
+export function Protection({ serverId, tenant }: { serverId: string; tenant: string | null }) {
+  const { data, error, loading } = useResource(() => api.protection(serverId, tenant), [serverId, tenant]);
 
   if (error) return <Banner tone="bad">{error}</Banner>;
   if (loading && !data) return <Empty>Reading this server's configuration…</Empty>;
@@ -33,42 +33,80 @@ export function Protection({ serverId }: { serverId: string }) {
 
   return (
     <div className="space-y-4">
+      <TenantScope p={data} />
       <Headline p={data} />
       <Pipeline p={data} />
       <Posture p={data} />
+      <Surface p={data} />
       <Rules p={data} />
       {data.tenant && <Tenant p={data} />}
       <Egress p={data} />
-      <Credentials p={data} />
       <Approvals p={data} />
       <Audit p={data} />
-      {data.generation && <Generation p={data} />}
-      <Withheld p={data} />
-      <Reviews p={data} />
-      <ServerFindings p={data} />
     </div>
   );
 }
 
+/*
+ * Which tenant the whole page is about.
+ *
+ * Approvals, grants, the exposure switch and reach are all keyed by tenant, so
+ * without this the page presents one tenant's answers as the gateway's. Shown
+ * only where the gateway has tenants at all.
+ */
+function TenantScope({ p }: { p: ServerProtection }) {
+  if (!p.tenant) return null;
+  return (
+    <Banner tone="info">
+      Every figure below is for tenant <Mono>{p.tenant_scope === "" ? "(none)" : p.tenant_scope}</Mono>
+      {p.explicitTenant
+        ? "."
+        : `, which this console read from ${p.tenant.sourceProse} rather than being told.`}{" "}
+      Approvals, pre-approvals, switches and reach are all per tenant.
+    </Banner>
+  );
+}
+
 function Headline({ p }: { p: ServerProtection }) {
-  const high = p.counts["high"] ?? 0;
-  const medium = p.counts["medium"] ?? 0;
   return (
     <div className="space-y-2">
-      {high > 0 ? (
-        <Banner tone="bad">
-          {high} high-severity finding{high === 1 ? "" : "s"} on this surface
-          {medium > 0 && `, and ${medium} medium`}. This server should not be shipped as it is.
+      {/*
+       * Three states, not two. "Nothing published" used to render as a clean
+       * bill of health, because an empty finding list and a clean scan were the
+       * same value -- so the page said nothing was wrong about a surface it had
+       * never seen. Saying "unknown" is the only honest version of that.
+       */}
+      {p.surface.neverPublished ? (
+        <Banner tone="warn">
+          This gateway has never reported what it serves, so nothing below describes its tools. Start it once and it
+          will publish the surface its upstreams advertise.
         </Banner>
-      ) : medium > 0 ? (
-        <Banner tone="warn">{medium} medium-severity finding(s). Nothing high-severity.</Banner>
+      ) : p.surface.stale ? (
+        <Banner tone="warn">
+          No running gateway is announcing itself, so this is the last surface one published
+          {p.surface.publishedAt ? <> — {relativeTime(p.surface.publishedAt)}</> : null}. It may no longer be what
+          the upstreams offer.
+        </Banner>
+      ) : p.surface.injectionCount > 0 ? (
+        <Banner tone="bad">
+          {p.surface.injectionCount} of {p.surface.toolCount} tools advertise text carrying injected instructions.
+          {p.surface.hiddenCount > 0 && ` ${p.surface.hiddenCount} withheld from the model entirely.`} Upstream tool
+          text is not trustworthy on this gateway.
+        </Banner>
+      ) : p.surface.unclassifiedCount > 0 ? (
+        <Banner tone="warn">
+          {p.surface.unclassifiedCount} tool(s) could not be classified, so they are refused. Name them in a policy
+          rule to make them reachable.
+        </Banner>
       ) : (
-        <Banner tone="ok">The scanner finds nothing wrong with this surface.</Banner>
+        <Banner tone="ok">
+          {p.surface.toolCount} tool(s) reported, all classified, none advertising injected instructions.
+        </Banner>
       )}
       {p.tenant?.error && (
         <Banner tone="warn">
-          {p.tenant.error} (The console resolves the tenant from its own environment, which may differ
-          from the server's.)
+          {p.tenant.error} (The console resolves the tenant from its own environment, which may differ from the
+          gateway's.)
         </Banner>
       )}
       {!p.audit.enabled && (
@@ -78,7 +116,7 @@ function Headline({ p }: { p: ServerProtection }) {
       )}
       {p.audit.enabled && !p.audit.verify.written && (
         <Banner tone="warn">
-          Nothing has been written to the audit log yet. That is expected if this server has not run.
+          Nothing has been written to the audit log yet. That is expected if this gateway has not run.
         </Banner>
       )}
       {p.audit.enabled && p.audit.verify.written && !p.audit.verify.ok && (
@@ -96,7 +134,7 @@ function Pipeline({ p }: { p: ServerProtection }) {
   return (
     <Panel
       title="What happens to a tool call, in order"
-      subtitle="This describes the shared runtime every generated server and the gateway use. Each step cites its source."
+      subtitle="This describes the enforcement path every upstream call takes. Each step cites its source."
     >
       <ol className="space-y-1.5">
         {p.pipeline.map((step) => (
@@ -225,6 +263,49 @@ function Tenant({ p }: { p: ServerProtection }) {
   );
 }
 
+function Surface({ p }: { p: ServerProtection }) {
+  const s = p.surface;
+  return (
+    <Panel
+      title="The surface this gateway reported"
+      subtitle="Taken from each upstream's own tools/list — the same call, and the same fields, the agent is given."
+    >
+      {s.neverPublished ? (
+        <Empty>
+          Nothing published yet. The console does not connect a gateway's upstreams itself, so this fills in once the
+          gateway has run.
+        </Empty>
+      ) : (
+        <>
+          <dl className="grid gap-3 sm:grid-cols-3">
+            <Field label="Tools reported">{s.toolCount}</Field>
+            <Field label="Withheld by policy">
+              {s.hiddenCount === 0 ? "none" : `${s.hiddenCount} — injected text, on_injection: deny`}
+            </Field>
+            <Field label="Unclassified">
+              {s.unclassifiedCount === 0 ? "none" : `${s.unclassifiedCount}, refused`}
+            </Field>
+            <Field label="Advertising injected text">{s.injectionCount === 0 ? "none" : s.injectionCount}</Field>
+            <Field label="Reported">{s.publishedAt ? relativeTime(s.publishedAt) : "—"}</Field>
+            <Field label="Confirmed current">
+              {s.live ? (
+                "yes — a gateway is announcing itself"
+              ) : (
+                <span className="text-write">no — nothing is announcing itself</span>
+              )}
+            </Field>
+          </dl>
+          <p className="mt-3 text-xs text-ink-soft">
+            {/* The distinction the whole panel exists to carry. */}
+            Only a surface a live gateway confirms can be switched here: writing a kill switch against a tool name
+            that is no longer served produces a row that reads as protection and guards nothing.
+          </p>
+        </>
+      )}
+    </Panel>
+  );
+}
+
 function Egress({ p }: { p: ServerProtection }) {
   const e = p.egress;
   return (
@@ -247,39 +328,10 @@ function Egress({ p }: { p: ServerProtection }) {
         </Field>
         <Field label="Plaintext HTTP">{e.allowHttp ? "permitted" : "refused"}</Field>
       </dl>
-      {p.api && e.baseUrlPermitted === false && (
-        <div className="mt-3">
-          <Banner tone="bad">
-            This server calls <Mono>{p.api.baseUrl}</Mono>, which the allowlist does not permit. Every call
-            will be refused at runtime.
-          </Banner>
-        </div>
-      )}
     </Panel>
   );
 }
 
-function Credentials({ p }: { p: ServerProtection }) {
-  return (
-    <Panel title="Credentials">
-      <dl className="grid gap-3 sm:grid-cols-3">
-        <Field label="Scheme">{p.auth.kind}</Field>
-        {p.auth.envVar && (
-          <>
-            <Field label="Read from">
-              <Mono>{p.auth.envVar}</Mono>
-            </Field>
-            <Field label="Set in this environment">{p.auth.envPresent ? "yes" : "no"}</Field>
-          </>
-        )}
-      </dl>
-      <p className="mt-3 text-xs text-ink-soft">
-        The console reports the variable's name and whether it is set. It never reads the value, and the
-        value is never sent to the browser.
-      </p>
-    </Panel>
-  );
-}
 
 function Approvals({ p }: { p: ServerProtection }) {
   return (
@@ -323,128 +375,6 @@ function Audit({ p }: { p: ServerProtection }) {
           )}
         </Field>
       </dl>
-    </Panel>
-  );
-}
-
-function Generation({ p }: { p: ServerProtection }) {
-  const g = p.generation!;
-  return (
-    <Panel title="How this surface was generated">
-      <dl className="grid gap-3 sm:grid-cols-3">
-        {g.specFormat && <Field label="Spec format">{g.specFormat}</Field>}
-        <Field label="Spec declares authentication">
-          {g.hasSecuritySchemes === null ? "unknown" : g.hasSecuritySchemes ? "yes" : "no"}
-        </Field>
-        <Field label="Operations not exposed">{g.skipped.length}</Field>
-      </dl>
-
-      {g.operationsWithoutSecurity.length > 0 && (
-        <div className="mt-3">
-          <p className="text-sm">These exposed operations declare no authentication in the spec:</p>
-          <ul className="mt-1 flex flex-wrap gap-1.5">
-            {g.operationsWithoutSecurity.map((o) => (
-              <li key={o}>
-                <Mono>{o}</Mono>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      {g.skipped.length > 0 && (
-        <div className="mt-3">
-          <p className="text-sm">Operations an agent cannot reach at all:</p>
-          <ul className="mt-1 space-y-1 text-sm">
-            {g.skipped.map((s) => (
-              <li key={s.tool} className="flex flex-wrap items-baseline gap-2">
-                <Mono>{s.tool}</Mono>
-                <span className="text-ink-soft">{s.reason}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-    </Panel>
-  );
-}
-
-function Withheld({ p }: { p: ServerProtection }) {
-  const rows = p.tools.flatMap((t) => t.withheldParams.map((w) => ({ tool: t.name, ...w })));
-  if (rows.length === 0) return null;
-
-  const byReason = new Map<string, typeof rows>();
-  for (const row of rows) {
-    byReason.set(row.reason, [...(byReason.get(row.reason) ?? []), row]);
-  }
-
-  return (
-    <Panel
-      title={`${rows.length} parameter(s) withheld from the model`}
-      subtitle="Present upstream, absent from every tool schema, grouped by why."
-    >
-      <div className="space-y-3">
-        {[...byReason.entries()].map(([reason, group]) => (
-          <div key={reason}>
-            <p className="text-sm font-medium">{reason}</p>
-            <ul className="mt-1 flex flex-wrap gap-1.5">
-              {group.map((row) => (
-                <li key={`${row.tool}.${row.name}`}>
-                  <Tag title={`${row.tool} — ${row.in ?? "unknown location"}`}>
-                    {row.tool}.{row.name}
-                  </Tag>
-                </li>
-              ))}
-            </ul>
-          </div>
-        ))}
-      </div>
-    </Panel>
-  );
-}
-
-function Reviews({ p }: { p: ServerProtection }) {
-  const rows = p.tools.filter((t) => t.review);
-  if (rows.length === 0) return null;
-  return (
-    <Panel
-      title={`${rows.length} tool(s) a human should confirm`}
-      subtitle="The generator inferred these classifications and could not decide safely."
-    >
-      <ul className="space-y-2">
-        {rows.map((t) => (
-          <li key={t.name} className="rounded-md border border-medium/40 bg-medium/5 p-2.5">
-            <div className="flex flex-wrap items-center gap-2">
-              <Mono>{t.name}</Mono>
-              <EffectBadge effect={t.effect} />
-              <VerdictBadge kind={t.verdict.kind} />
-            </div>
-            <p className="mt-1 text-sm text-ink-soft">{t.review}</p>
-          </li>
-        ))}
-      </ul>
-    </Panel>
-  );
-}
-
-function ServerFindings({ p }: { p: ServerProtection }) {
-  if (p.findings.length === 0) return null;
-  return (
-    <Panel title="Findings about the surface as a whole">
-      <ul className="space-y-2">
-        {p.findings.map((f, i) => (
-          <li key={i} className="text-sm">
-            <div className="flex flex-wrap items-center gap-2">
-              <SeverityBadge severity={f.severity} />
-              <Mono>{f.ruleId}</Mono>
-              <span className="font-medium">{f.title}</span>
-              {f.location.path && <span className="mono text-xs text-ink-soft">{f.location.path}</span>}
-            </div>
-            <p className="mt-0.5 text-ink-soft">{f.message}</p>
-            <p className="mt-0.5 text-xs text-ink-soft">Fix: {f.fix}</p>
-          </li>
-        ))}
-      </ul>
     </Panel>
   );
 }

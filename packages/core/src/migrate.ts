@@ -1,4 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
+import { TOOL_INVENTORY_SCHEMA } from "./inventory.js";
 import { RUNTIME_STATE_SCHEMA } from "./runtime-state.js";
 
 /**
@@ -103,6 +104,23 @@ const MIGRATIONS: readonly Migration[] = [
        * the same statement for the ones that do not.
        */
       db.exec(RUNTIME_STATE_SCHEMA);
+    }
+  },
+  {
+    name: "create tool_inventory so a gateway can publish the surface it serves",
+    up(db) {
+      /*
+       * New table, so the same two-line shape as the migration above: fresh
+       * databases get it from `createLatest`, and this is the statement for the
+       * ones already stamped at an earlier version.
+       *
+       * Nothing is backfilled, and there is nothing that could be: the rows
+       * describe what a *running* process is serving, and the only honest answer
+       * for a gateway that has not started since this build is "unknown". A
+       * reader already has to treat an absent inventory that way, because a
+       * gateway may have exited.
+       */
+      db.exec(TOOL_INVENTORY_SCHEMA);
     }
   }
 ];

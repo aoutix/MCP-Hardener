@@ -76,7 +76,24 @@ function verdictOf(tool: ToolProtection): { kind: VerdictKind; label: string; ti
       title: "Approval is required for this function, but approvals are disabled in this policy."
     };
   }
-  if (tool.review) return { kind: "review", label: "Needs review", title: tool.review };
+  if (tool.hiddenByPolicy) {
+    return {
+      kind: "refused",
+      label: "Withheld",
+      title:
+        "Gateway policy hides this tool from every caller: its upstream description carried injected " +
+        "instructions and on_injection is set to deny."
+    };
+  }
+  if (tool.effect === null) {
+    return {
+      kind: "refused",
+      label: "Unclassified",
+      title:
+        "The gateway could not classify what this tool does, so it is refused rather than guessed at. " +
+        "Classify it with a policy rule to make it reachable."
+    };
+  }
   if (tool.verdict.kind === "deny") return { kind: "refused", label: "Refused", title: tool.verdict.reason };
   if (tool.verdict.kind === "approve") return { kind: "review", label: "Needs approval", title: tool.verdict.reason };
   return { kind: "allowed", label: "Allowed", title: tool.verdict.reason };
@@ -88,22 +105,41 @@ const PERMISSION: Record<string, { label: string; className: string }> = {
   destructive: { label: "Destructive", className: "text-destructive" }
 };
 
+/*
+ * An upstream tool may carry no classification at all, which a generated
+ * surface could not. That is a state worth naming rather than rendering as a
+ * blank cell, because it is the state the gateway refuses.
+ */
+const UNCLASSIFIED = { label: "Unclassified", className: "text-ink-soft" };
+
+function permissionOf(effect: string | null): { label: string; className: string } {
+  if (effect === null) return UNCLASSIFIED;
+  return PERMISSION[effect] ?? { label: effect, className: "text-ink-soft" };
+}
+
+/** How the gateway decided an effect, in words rather than an enum. */
+const EFFECT_SOURCE: Record<string, string> = {
+  policy: "a policy rule names this tool",
+  annotation: "the upstream's own annotation, taken only when policy is silent",
+  name: "inferred from the tool's name",
+  unclassified: "nothing classified it, so the gateway refuses it"
+};
+
 function signatureOf(tool: ToolProtection): string {
   const args = tool.args.map((a) => `${a.name}${a.required ? "" : "?"}: ${a.type ?? "any"}`).join(", ");
   return `(${args})`;
 }
 
-function authLabel(server: ServerProtection | null): string {
-  const kind = server?.auth.kind;
-  if (!kind || kind === "none") return "No upstream auth";
-  if (kind === "bearer") return "Bearer token";
-  if (kind === "apiKey" || kind === "api_key") return "API key";
-  if (kind === "basic") return "Basic auth";
-  return kind;
-}
-
-export function Functions({ serverId, onServerChanged }: { serverId: string; onServerChanged: () => void }) {
-  const { data, error, loading, reload } = useResource(() => api.protection(serverId), [serverId]);
+export function Functions({
+  serverId,
+  tenant,
+  onServerChanged
+}: {
+  serverId: string;
+  tenant: string | null;
+  onServerChanged: () => void;
+}) {
+  const { data, error, loading, reload } = useResource(() => api.protection(serverId, tenant), [serverId, tenant]);
   const [query, setQuery] = useState("");
   const [effect, setEffect] = useState("all");
   const [filter, setFilter] = useState<"all" | VerdictKind>("all");
@@ -121,6 +157,7 @@ export function Functions({ serverId, onServerChanged }: { serverId: string; onS
   const [held, setHeld] = useState<string[]>([]);
   const exposure = useExposure(
     serverId,
+    tenant,
     data,
     reload,
     (name) => setHeld((h) => (h.includes(name) ? h : [...h, name])),
@@ -130,22 +167,16 @@ export function Functions({ serverId, onServerChanged }: { serverId: string; onS
   const all = useMemo(() => data?.tools ?? [], [data]);
 
   /*
-   * Which sorts this particular server can actually honour.
+   * Which sorts this gateway can actually honour.
    *
-   * Name and permission are properties of any tool surface, so they are always
-   * offered. Spec order is not: it needs `source.specIndex`, which only a
-   * server generated after that field existed carries. Offering it regardless
-   * meant the button said "Spec order" and quietly showed name order, which is
-   * the same false claim the exposure switch used to make — so the option is
-   * withdrawn rather than left to mislead, exactly as a switch that cannot
-   * change anything is.
-   *
-   * Computed per server, because the console switches between them and a sort
-   * that was available a moment ago may not be.
+   * Name and risk are properties of any tool surface. Grouping by upstream
+   * only says something when there is more than one, so it is withdrawn rather
+   * than offered as a button that reorders nothing — the same reason a switch
+   * that cannot change anything is not offered.
    */
   const sorts = useMemo(() => {
     const available: SortKey[] = ["risk", "name"];
-    if (all.some((t) => t.source?.specIndex !== undefined)) available.unshift("source");
+    if (new Set(all.map((t) => t.upstream)).size > 1) available.unshift("source");
     return available;
   }, [all]);
 
@@ -157,45 +188,42 @@ export function Functions({ serverId, onServerChanged }: { serverId: string; onS
     setHeld([]);
   }, [filter]);
 
+  /** The upstreams actually represented in the published surface. */
+  const upstreamNames = useMemo(() => [...new Set(all.map((t) => t.upstream))].sort(), [all]);
+
+  /*
+   * The effect values this surface actually contains, rather than the three a
+   * generated server could only ever have had. An upstream may classify
+   * nothing, and a filter offering a value no tool carries is a dead option.
+   */
+  const effectsPresent = useMemo(() => {
+    const present = new Set<string>();
+    for (const t of all) present.add(t.effect ?? "unclassified");
+    return ["read", "write", "destructive", "unclassified"].filter((e) => present.has(e));
+  }, [all]);
+
   const tools = useMemo(() => {
     const rank = { destructive: 0, write: 1, read: 2 } as Record<string, number>;
     const filtered = all.filter((t) => {
       if (filter !== "all" && verdictOf(t).kind !== filter && !held.includes(t.name)) return false;
-      if (effect !== "all" && t.effect !== effect) return false;
+      if (effect !== "all" && (t.effect ?? "unclassified") !== effect) return false;
       if (!query) return true;
-      return `${t.name} ${t.description} ${t.method} ${t.path}`.toLowerCase().includes(query.toLowerCase());
+      return `${t.name} ${t.description} ${t.upstream}`.toLowerCase().includes(query.toLowerCase());
     });
     if (activeSort === "name") return [...filtered].sort((a, b) => a.name.localeCompare(b.name));
     if (activeSort === "risk") {
       // Effect first, then name, so the order within a band is stable and does
       // not quietly depend on what the server happened to send.
       return [...filtered].sort(
-        (a, b) => (rank[a.effect] ?? 3) - (rank[b.effect] ?? 3) || a.name.localeCompare(b.name)
+        (a, b) => (rank[a.effect ?? ""] ?? 3) - (rank[b.effect ?? ""] ?? 3) || a.name.localeCompare(b.name)
       );
     }
     /*
-     * Spec order: the order the spec author wrote the operations in, which
-     * groups the ones on a single resource together in a way neither of the
-     * other two sorts does.
-     *
-     * It has to be reconstructed from `source.specIndex`, because the tool list
-     * arrives in name order — the generator writes it that way so a manifest
-     * stays readable and its diffs stay stable. Without the index this sort
-     * silently produced the same list as "Name", which is how it came to look
-     * broken: two of the three options were one option.
-     *
-     * A tool carrying no index — generated before the field existed, or from a
-     * gateway rather than a spec — sorts after the ones that do, in name order,
-     * rather than being scattered through them by a default of 0.
+     * By upstream, then by name: which server a tool came from is the thing a
+     * reviewer most often wants grouped, because trust is per-upstream. One
+     * server advertising an injected description says nothing about another.
      */
-    return [...filtered].sort((a, b) => {
-      const ai = a.source?.specIndex;
-      const bi = b.source?.specIndex;
-      if (ai !== undefined && bi !== undefined) return ai - bi;
-      if (ai !== undefined) return -1;
-      if (bi !== undefined) return 1;
-      return a.name.localeCompare(b.name);
-    });
+    return [...filtered].sort((a, b) => a.upstream.localeCompare(b.upstream) || a.name.localeCompare(b.name));
   }, [all, query, effect, filter, activeSort, held]);
 
   useEffect(() => {
@@ -239,10 +267,16 @@ export function Functions({ serverId, onServerChanged }: { serverId: string; onS
 
         <div className="mt-5 flex items-center justify-end gap-2 text-sm">
           <span className="mono text-[0.8125rem] text-ink-soft">
-            {data?.api?.title ?? "upstream"} {data?.api?.version ?? ""}
+            {upstreamNames.length > 0 ? upstreamNames.join(" · ") : "no upstream has reported"}
           </span>
         </div>
       </header>
+
+      {exposure.whyNotEditable && (
+        <div className="border-b border-edge px-7 py-3">
+          <Banner tone="warn">{exposure.whyNotEditable}</Banner>
+        </div>
+      )}
 
       {(exposure.error || exposure.notice) && (
         <div className="border-b border-edge px-7 py-3">
@@ -349,6 +383,7 @@ export function Functions({ serverId, onServerChanged }: { serverId: string; onS
               <FunctionDetail
                 key={active.name}
                 serverId={serverId}
+                tenant={tenant}
                 server={data}
                 fallback={active}
                 onCollapse={() => setDetailOpen(false)}
@@ -385,6 +420,8 @@ export function Functions({ serverId, onServerChanged }: { serverId: string; onS
  */
 function useExposure(
   serverId: string,
+  /** The tenant whose switch this is. Never defaulted — see `chooseTenant`. */
+  tenant: string | null,
   server: ServerProtection | null,
   reload: () => void,
   /** Told which function just changed, so the list can keep showing it. */
@@ -405,16 +442,31 @@ function useExposure(
   const [flash, setFlash] = useState<Record<string, boolean>>({});
   const warning = useDismissed("expose-mutating-function");
 
-  // A gateway's surface is its upstreams', discovered at connect time; there is
-  // no curated descriptor to switch off, and the backend refuses it too.
-  const editable = server?.kind === "generated";
+  /*
+   * The switch is offered only against a surface a live gateway confirms.
+   *
+   * Not because the row would fail to write — it would write perfectly well —
+   * but because a tool name taken from a surface nobody is serving produces a
+   * row that reads as protection and guards nothing. The backend refuses this
+   * too, and for the same reason; this keeps the UI from offering a control
+   * whose only outcome would be that refusal.
+   */
+  const editable = server?.surface.live === true;
+  const whyNotEditable =
+    server === null
+      ? null
+      : server.surface.neverPublished
+        ? "This gateway has not reported what it serves yet, so there is no tool list to switch against. Start it once."
+        : server.surface.stale
+          ? "No running gateway is announcing itself, so the tool list below cannot be confirmed as current. Switching against it could write a row that guards nothing."
+          : null;
 
   async function apply(tool: ToolProtection, disabled: boolean) {
     setBusy(tool.name);
     setError(null);
     setNotice(null);
     try {
-      const result = await api.setExposure(serverId, tool.name, disabled);
+      const result = await api.setExposure(serverId, tool.name, disabled, "", tenant);
       if (result.warning) setNotice(result.warning);
       onApplied(tool.name);
       setFlash((f) => ({ ...f, [tool.name]: !disabled }));
@@ -458,6 +510,7 @@ function useExposure(
     },
     /** undefined for a server whose exposure this console does not own. */
     onToggle: (tool: ToolProtection) => (editable ? () => toggle(tool) : undefined),
+    whyNotEditable,
     busy: (tool: ToolProtection) => busy === tool.name,
     flash: (tool: ToolProtection) => flash[tool.name],
     dialog: confirming ? (
@@ -492,7 +545,7 @@ function ExposeWarning({
   onConfirm: (dismiss: boolean) => void;
 }) {
   const [dismiss, setDismiss] = useState(false);
-  const permission = PERMISSION[tool.effect] ?? { label: tool.effect, className: "text-ink" };
+  const permission = permissionOf(tool.effect);
   const landsOn =
     tool.verdict.kind === "allow"
       ? "run without asking anyone"
@@ -524,11 +577,8 @@ function ExposeWarning({
     >
       <p>
         <span className="mono font-semibold">{tool.name}</span> is a{" "}
-        <span className={`font-semibold ${permission.className}`}>{permission.label.toLowerCase()}</span> function —{" "}
-        <span className="mono">
-          {tool.method} {tool.path}
-        </span>
-        . Switching it on puts it back on the model’s menu.
+        <span className={`font-semibold ${permission.className}`}>{permission.label.toLowerCase()}</span> function on{" "}
+        <span className="mono">{tool.upstream}</span>. Switching it on puts it back on the model’s menu.
       </p>
       <p className="mt-3">
         This does not change <span className="mono">policy.yaml</span>. It clears the console’s override and lets
@@ -748,7 +798,7 @@ function FunctionRow({
   held?: boolean;
 }) {
   const exposure = verdictOf(tool);
-  const permission = PERMISSION[tool.effect] ?? { label: tool.effect, className: "text-ink" };
+  const permission = permissionOf(tool.effect);
   const warn = exposure.kind === "review";
   const off = exposure.kind === "off";
 
@@ -781,18 +831,32 @@ function FunctionRow({
           {selected && <Icon name="external" size={12} className="text-accent" />}
         </span>
         <span className="mono mt-0.5 block truncate text-[0.8125rem] text-ink-soft">
-          {signatureOf(tool)} <span className="text-ink-faint">→ {tool.method} {tool.path}</span>
+          {signatureOf(tool)} <span className="text-ink-faint">→ {tool.upstream}</span>
         </span>
         <span className="mt-1 block truncate text-[0.8125rem] text-ink-soft">{tool.description}</span>
       </span>
 
       <span className="min-w-0 pt-0.5">
         <span className={`flex items-center gap-1.5 text-[0.8125rem] ${warn ? "text-write" : ""}`}>
-          <Icon name={warn ? "alert" : "lock"} size={13} className={warn ? "" : "text-ink-faint"} />
-          <span className="truncate">{authLabel(server)}</span>
+          <Icon
+            name={tool.injection ? "alert" : warn ? "alert" : "lock"}
+            size={13}
+            className={tool.injection || warn ? "" : "text-ink-faint"}
+          />
+          <span className="truncate">
+            {tool.injection ? "description rewritten" : tool.hiddenByPolicy ? "withheld" : tool.upstream}
+          </span>
         </span>
         <span className={`mono mt-0.5 block truncate text-xs ${warn ? "text-write" : "text-ink-faint"}`}>
-          {off ? "exposure.disabled" : tool.unreachable ? "unreachable" : tool.review ? "unclassified" : tool.verdict.ruleId}
+          {off
+            ? "exposure.disabled"
+            : tool.hiddenByPolicy
+              ? "on_injection.deny"
+              : tool.unreachable
+                ? "unreachable"
+                : tool.effect === null
+                  ? "unclassified"
+                  : tool.verdict.ruleId}
         </span>
       </span>
 
@@ -820,18 +884,20 @@ function FunctionRow({
 
 function FunctionDetail({
   serverId,
+  tenant,
   server,
   fallback,
   onCollapse,
   exposure: control
 }: {
   serverId: string;
+  tenant: string | null;
   server: ServerProtection | null;
   fallback: ToolProtection;
   onCollapse: () => void;
   exposure: ExposureControl;
 }) {
-  const { data } = useResource(() => api.tool(serverId, fallback.name), [serverId, fallback.name]);
+  const { data } = useResource(() => api.tool(serverId, fallback.name, tenant), [serverId, fallback.name, tenant]);
   // The list is reloaded after a toggle, so `fallback` carries the fresher
   // exposure state; this pane's own fetch is not repeated on every change.
   const tool = data ? { ...data, exposure: fallback.exposure } : fallback;
@@ -869,9 +935,7 @@ function FunctionDetail({
         <p className="mt-1.5 text-[0.8125rem] leading-relaxed text-ink-soft">{tool.description}</p>
         <div className="mono mt-2 flex items-center gap-1.5 text-xs text-ink-soft">
           <Icon name="file" size={13} className="text-ink-faint" />
-          <span className="truncate">
-            {tool.method} {tool.path}
-          </span>
+          <span className="truncate">{tool.upstream}</span>
         </div>
       </div>
 
@@ -970,7 +1034,7 @@ function ConfigurationTab({
   exposure: ExposureControl;
 }) {
   const exposure = verdictOf(tool);
-  const permission = PERMISSION[tool.effect] ?? { label: tool.effect, className: "text-ink" };
+  const permission = permissionOf(tool.effect);
   const audit = server?.audit;
 
   return (
@@ -984,16 +1048,29 @@ function ConfigurationTab({
        */}
       {server?.runtime.policyApplied === false && (
         <Banner tone="warn">
-          <strong>Not what the running server is enforcing.</strong> It started{" "}
+          <strong>Not what the running gateway is enforcing.</strong> It started{" "}
           {server.runtime.startedAt ? relativeTime(server.runtime.startedAt) : "earlier"} and is still applying the{" "}
-          <Mono>policy.yaml</Mono> it parsed then. The file has changed since, so the verdict, rule and safeguards
-          below describe the file rather than what any call is actually being held to.
-          <span className="mt-1.5 block text-ink-soft">Restart the server to apply it.</span>
+          <Mono>{server.runtime.policyPath ?? "configuration"}</Mono> it parsed then. The file has changed since, so
+          the verdict, rule and safeguards below describe the file rather than what any call is actually being held
+          to.
+          <span className="mt-1.5 block text-ink-soft">Restart the gateway to apply it.</span>
         </Banner>
       )}
-      {tool.review && (
+      {tool.effect === null && (
         <Banner tone="warn">
-          <strong>The generator could not classify this safely.</strong> {tool.review}
+          <strong>The gateway could not classify what this tool does.</strong> Nothing in policy names it, and its
+          upstream offered no usable annotation, so it is refused rather than guessed at. Add a policy rule naming
+          it to make it reachable.
+        </Banner>
+      )}
+      {tool.injection && (
+        <Banner tone="warn">
+          <strong>Its upstream description carried injected instructions.</strong> The gateway matched{" "}
+          {tool.injection.map((id) => (
+            <Mono key={id}>{id}</Mono>
+          ))}{" "}
+          in the text this upstream advertised{tool.hiddenByPolicy ? " and withheld the tool entirely" : ""}. What
+          the model is told is shown above; what the upstream actually said is on the Schema tab.
         </Banner>
       )}
       {tool.unreachable && !tool.exposure.disabled && (
@@ -1063,7 +1140,10 @@ function ConfigurationTab({
 
       <Section icon="shield" title="Access policy">
         <dl className="space-y-2">
-          <Row label="Authentication">{authLabel(server)}</Row>
+          <Row label="Upstream">
+            <Mono>{tool.upstream}</Mono>
+          </Row>
+          <Row label="Classified by">{EFFECT_SOURCE[tool.effectSource] ?? tool.effectSource}</Row>
           <Row label="Policy rule">
             <Mono>{tool.verdict.ruleId}</Mono>
           </Row>
@@ -1090,11 +1170,22 @@ function ConfigurationTab({
               </span>
             </Row>
           )}
-          <Row label="Tenant isolation">
-            {tool.tenantParams.length > 0 ? (
-              <span className="text-accent-strong">Enforced</span>
+          <Row label="Tenant scoping">
+            {server?.tenant ? (
+              <span className="text-accent-strong">
+                {server.tenant.field} from {server.tenant.sourceKind}
+              </span>
             ) : (
               <span className="text-ink-soft">Not configured</span>
+            )}
+          </Row>
+          <Row label="Advertised to the model">
+            {tool.hiddenByPolicy ? (
+              <span className="text-destructive">No — withheld by gateway policy</span>
+            ) : tool.exposure.disabled ? (
+              <span className="text-write">No — switched off here</span>
+            ) : (
+              <span className="text-accent-strong">Yes</span>
             )}
           </Row>
         </dl>
@@ -1129,7 +1220,6 @@ function ConfigurationTab({
           )}
           <p className="mono mt-1.5 text-[0.6875rem] text-ink-faint">
             additionalProperties: {String(!tool.schemaClosed)}
-            {tool.paginationCap && ` · ${tool.paginationCap.param} ≤ ${tool.paginationCap.max}`}
           </p>
         </div>
         <p className="mt-2 flex items-start gap-1.5 text-xs text-ink-soft">
@@ -1145,28 +1235,18 @@ function ConfigurationTab({
       </Section>
 
       {/*
-       * Three of these four are `policy.egress` / `policy.audit` values and are
-       * identical on every function this server exposes; only the pagination
-       * cap is per-tool. Unmarked under a "Function details" heading they read
-       * as facts about this one function, so the odd one out is tagged and the
-       * caption says which file the rest come from.
+       * Every value here is a `policy.egress` / `policy.audit` setting and is
+       * identical on every function this gateway exposes. Unmarked under a
+       * "Function details" heading they would read as facts about this one
+       * function, so the caption says where they come from instead.
        */}
-      <Section icon="timer" title="Runtime safeguards" aside={<Tag>server-wide</Tag>}>
+      <Section icon="timer" title="Runtime safeguards" aside={<Tag>gateway-wide</Tag>}>
         <dl className="space-y-2">
           <Row label="Upstream timeout">
             {server ? <span className="mono">{server.egress.timeoutMs.toLocaleString()} ms</span> : "—"}
           </Row>
           <Row label="Response cap">
             {server ? <span className="mono">{bytes(server.egress.maxBodyBytes)}</span> : "—"}
-          </Row>
-          <Row label="Pagination cap" tag="this function">
-            {tool.paginationCap ? (
-              <span className="mono">
-                {tool.paginationCap.param} ≤ {tool.paginationCap.max}
-              </span>
-            ) : (
-              <span className="text-ink-soft">None</span>
-            )}
           </Row>
           <Row label="Audit logging">
             {audit?.enabled ? (
@@ -1179,42 +1259,15 @@ function ConfigurationTab({
           </Row>
         </dl>
         <p className="mt-2 text-xs text-ink-soft">
-          The timeout, response cap and audit settings are set once in <Mono>policy.yaml</Mono> and apply to every
-          function on this server. Only the pagination cap is per function.
+          These are set once in <Mono>{server?.runtime.policyPath ?? "the gateway configuration"}</Mono> and apply to
+          every function this gateway exposes.
           {/* Said plainly rather than left to be assumed: with nothing running
               these are what the next start would load, not what is in force. */}
           {server && !server.runtime.running && (
-            <> No running server has announced itself, so these are the values one would load when it next starts.</>
+            <> No running gateway has announced itself, so these are the values one would load when it next starts.</>
           )}
         </p>
       </Section>
-
-      {tool.withheldParams.length > 0 && (
-        <Section icon="lock" title="Withheld from the model">
-          <ul className="space-y-1.5 text-[0.8125rem]">
-            {tool.withheldParams.map((p) => (
-              <li key={`${p.in}:${p.name}`} className="flex flex-wrap items-baseline gap-1.5">
-                <span className="mono">{p.name}</span>
-                {p.in && <Tag>{p.in}</Tag>}
-                <span className="text-ink-soft">{p.reason}</span>
-              </li>
-            ))}
-          </ul>
-        </Section>
-      )}
-
-      {tool.tenantParams.length > 0 && (
-        <Section icon="shield-check" title="Tenant scoping">
-          <ul className="space-y-1 text-[0.8125rem] text-ink-soft">
-            {tool.tenantParams.map((t) => (
-              <li key={t.param}>
-                <span className="mono text-ink">{t.param}</span> is injected into {t.injectedInto.join(", ")} after the
-                model's arguments are placed, so an argument cannot overwrite it.
-              </li>
-            ))}
-          </ul>
-        </Section>
-      )}
 
       {tool.standingGrants.length > 0 && (
         <Section icon="check-circle" title="Standing grants">
@@ -1236,23 +1289,6 @@ function ConfigurationTab({
         </Section>
       )}
 
-      {tool.findings.length > 0 && (
-        <Section icon="alert" title="Scanner findings">
-          <ul className="space-y-2.5">
-            {tool.findings.map((f, i) => (
-              <li key={i} className="text-[0.8125rem]">
-                <div className="flex flex-wrap items-center gap-2">
-                  <SeverityBadge severity={f.severity} />
-                  <Mono>{f.ruleId}</Mono>
-                  <span className="font-medium">{f.title}</span>
-                </div>
-                <p className="mt-0.5 text-ink-soft">{f.message}</p>
-                <p className="mt-0.5 text-xs text-ink-faint">Fix: {f.fix}</p>
-              </li>
-            ))}
-          </ul>
-        </Section>
-      )}
     </div>
   );
 }
@@ -1269,7 +1305,7 @@ function SchemaTab({ tool }: { tool: ToolProtection }) {
               <tr>
                 <th className="py-1 pr-3 font-medium">Name</th>
                 <th className="py-1 pr-3 font-medium">Type</th>
-                <th className="py-1 font-medium">Lands upstream as</th>
+                <th className="py-1 font-medium">Bounds</th>
               </tr>
             </thead>
             <tbody>
@@ -1281,19 +1317,7 @@ function SchemaTab({ tool }: { tool: ToolProtection }) {
                   </td>
                   <td className="py-1.5 pr-3 text-ink-soft">{arg.type ?? "—"}</td>
                   <td className="py-1.5">
-                    {arg.binding ? (
-                      <span className="mono text-xs">
-                        {arg.binding.in}.{arg.binding.name}
-                      </span>
-                    ) : (
-                      "—"
-                    )}
-                    {arg.renamed && (
-                      <Tag title={`The model sees "${arg.name}"; upstream receives "${arg.binding!.name}".`}>
-                        renamed
-                      </Tag>
-                    )}
-                    {arg.constrainedByRule && <Tag>bounded by {arg.constrainedByRule}</Tag>}
+                    {arg.constrainedByRule ? <Tag>bounded by {arg.constrainedByRule}</Tag> : "—"}
                   </td>
                 </tr>
               ))}
@@ -1302,19 +1326,33 @@ function SchemaTab({ tool }: { tool: ToolProtection }) {
         )}
       </Section>
 
-      <Section icon="file" title="MCP annotations">
-        <div className="flex flex-wrap gap-1.5">
-          {Object.entries(tool.annotations).filter(([, v]) => v).length === 0 ? (
-            <span className="text-[0.8125rem] text-ink-soft">none</span>
-          ) : (
-            Object.entries(tool.annotations)
-              .filter(([, v]) => v)
-              .map(([k]) => <Tag key={k}>{k}</Tag>)
+      {/*
+       * The two descriptions, side by side, only when they differ. This is the
+       * one place a reviewer can see what an upstream tried to tell the model
+       * and what the gateway replaced it with — a diff that is the entire point
+       * of treating upstream text as untrusted.
+       */}
+      {tool.rawDescription !== tool.description && (
+        <Section icon="alert" title="What the upstream said, and what the model is told">
+          <p className="text-xs text-ink-faint">Advertised by the upstream</p>
+          <p className="mono mt-1 rounded-lg border border-edge bg-raise px-3 py-2 text-[0.8125rem] whitespace-pre-wrap">
+            {tool.rawDescription}
+          </p>
+          <p className="mt-3 text-xs text-ink-faint">Given to the model instead</p>
+          <p className="mono mt-1 rounded-lg border border-edge bg-raise px-3 py-2 text-[0.8125rem] whitespace-pre-wrap">
+            {tool.description}
+          </p>
+          {tool.injection && (
+            <p className="mt-2 text-xs text-ink-soft">
+              Matched{" "}
+              {tool.injection.map((id) => (
+                <Mono key={id}>{id}</Mono>
+              ))}
+              .
+            </p>
           )}
-          {tool.source?.operationId && <Tag title="Operation id in the spec">{tool.source.operationId}</Tag>}
-          {tool.source?.deprecated && <Tag>deprecated in the spec</Tag>}
-        </div>
-      </Section>
+        </Section>
+      )}
 
       {tool.inputSchema !== undefined && tool.inputSchema !== null && (
         <Section icon="braces" title="The schema the model receives">

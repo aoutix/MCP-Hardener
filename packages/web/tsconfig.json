@@ -4,7 +4,6 @@
   "include": ["src/**/*.ts"],
   "references": [
     { "path": "../core" },
-    { "path": "../runtime" },
     { "path": "../scanner" },
     { "path": "../gateway" }
   ]

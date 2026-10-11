@@ -9,15 +9,17 @@ import {
   ApprovalStore,
   AuditLog,
   EgressGuard,
+  enforceCall,
   exposureDeniedReason,
   NO_TENANT,
+  policyDigest,
   requireTenant,
   type ElicitFn,
   type Policy,
   type Scope,
-  type ScopedApprovals
+  type ScopedApprovals,
+  type ToolInventoryInput
 } from "@hmcp/core";
-import { enforceCall } from "@hmcp/server-runtime";
 import { findInjection, scan, type ScanTool } from "@hmcp/scanner";
 import { classify } from "./classify.js";
 import { withCredential, type UpstreamCredential } from "./credential.js";
@@ -40,15 +42,20 @@ export interface GatewayOptions {
   readonly config: GatewayConfig;
   readonly policy: Policy;
   readonly cwd?: string;
+  /**
+   * Where the config this gateway parsed was read from, reported so a reader
+   * can name the file in a warning. A gateway's policy may be inline in its
+   * config, so this is the config path rather than a policy path.
+   */
+  readonly policyPath?: string;
 }
 
 /**
  * An MCP server that fronts other MCP servers.
  *
- * It applies the same policy, approvals, egress limits and audit log that a
- * generated server applies, to servers it did not generate. Upstream tool text
- * is untrusted input: it is scanned for injection before being advertised, and
- * an upstream tool with no classification is not reachable at all.
+ * Upstream tool text is untrusted input: it is scanned for injection before
+ * being advertised, and an upstream tool with no classification is not
+ * reachable at all.
  */
 /**
  * What one call knows about who is making it.
@@ -114,14 +121,18 @@ export class Gateway {
   /** Shared by every per-session `Server` this gateway mints. */
   private readonly instructions: string;
   private readonly cwd: string | undefined;
+  private readonly policyPath: string;
   /** The audit `component`, which is also half of every storage scope. */
   private readonly component: string;
+  /** The liveness beat, running only while this process is actually serving. */
+  private heartbeat: NodeJS.Timeout | undefined;
 
   constructor(options: GatewayOptions) {
     this.config = options.config;
     this.policy = options.policy;
     this.egress = new EgressGuard(options.policy.egress);
     this.cwd = options.cwd;
+    this.policyPath = options.policyPath ?? "";
     this.component = `gateway:${options.config.name}`;
     this.audit = new AuditLog({
       config: options.policy.audit,
@@ -176,11 +187,63 @@ export class Gateway {
   }
 
   /**
+   * Publishes what this process is serving, and starts saying it is alive.
+   *
+   * Called only from the paths that actually serve, never from `tools` or
+   * `scan`: those connect upstreams too, and a short-lived command announcing
+   * itself would briefly claim a running gateway that is about to exit.
+   *
+   * Everything here is advisory. A console uses it to decide whether it may
+   * believe a tool list, and enforcement reads none of it, so a failure must
+   * cost the announcement and not the gateway.
+   */
+  announceServing(): void {
+    try {
+      this.approvalStore.recordRuntimeState({
+        component: this.component,
+        pid: process.pid,
+        started_at: Date.now(),
+        policy_digest: policyDigest(this.policy),
+        policy_path: this.policyPath
+      });
+
+      /*
+       * The surface comes from each upstream's MCP `tools/list` -- the same
+       * call and the same fields the agent is given -- so this is a relay of
+       * what we were told, not a second description of it. `description` is
+       * what the model is advertised, after `on_injection` has had its say;
+       * `rawDescription` is the upstream's own text, kept so a reader can see
+       * that the two differ and why.
+       */
+      this.approvalStore.publishInventory(this.component, process.pid, this.inventoryInputs());
+    } catch {
+      /* ignored: advisory only, and never worth failing a startup over */
+    }
+
+    if (this.heartbeat) return;
+    /*
+     * Same cadence the generated runtime used, because the reader's staleness
+     * window is the one it set: `RUNTIME_STATE_TTL_MS` is three missed beats
+     * plus a second of slack. Unref'd so it cannot be the reason a process
+     * stays alive.
+     */
+    this.heartbeat = setInterval(() => {
+      try {
+        this.approvalStore.touchRuntimeState(this.component, process.pid);
+      } catch {
+        /* ignored: the next beat may well work */
+      }
+    }, 2000);
+    this.heartbeat.unref?.();
+  }
+
+  /**
    * Connects the upstreams, installs the handlers, and serves - over stdio by
    * default, or over a supplied transport (used by tests).
    */
   async start(transport?: Parameters<Server["connect"]>[0]): Promise<void> {
     await this.connectUpstreams();
+    this.announceServing();
     this.installHandlers(this.server, this.session);
     await this.server.connect(transport ?? new StdioServerTransport());
   }
@@ -532,6 +595,30 @@ export class Gateway {
     return outcome.result as { isError?: boolean; content: { type: "text"; text: string }[] };
   }
 
+  /**
+   * Each upstream tool in the shape a reader consumes, which is the one shape
+   * `toolSurfaceOf` joins against exposure.
+   *
+   * The only place a `GatewayTool` becomes that, so this gateway answering for
+   * itself and a console reading what it published describe the same tool
+   * identically. `description` is what the model is told, after `on_injection`
+   * has had its say; `rawDescription` is the upstream's own text, kept so a
+   * reader can see that the two differ.
+   */
+  inventoryInputs(): ToolInventoryInput[] {
+    return [...this.tools.values()].map((entry) => ({
+      tool: entry.localName,
+      upstream: entry.upstream.spec.name,
+      effect: entry.effect ?? null,
+      effectSource: entry.effectSource,
+      description: entry.description,
+      rawDescription: entry.tool.description,
+      inputSchema: entry.tool.inputSchema,
+      hidden: entry.hidden,
+      injection: entry.injection?.patternIds ?? null
+    }));
+  }
+
   /** What the gateway decided about each upstream tool, for `hmcp-gateway tools`. */
   inventory(): readonly GatewayTool[] {
     return [...this.tools.values()];
@@ -550,6 +637,10 @@ export class Gateway {
   }
 
   async close(): Promise<void> {
+    if (this.heartbeat) {
+      clearInterval(this.heartbeat);
+      this.heartbeat = undefined;
+    }
     await this.server.close().catch(() => undefined);
     await Promise.all(this.connections.map((c) => c.close().catch(() => undefined)));
     await this.egress.close();

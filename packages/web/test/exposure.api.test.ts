@@ -1,5 +1,5 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
@@ -8,6 +8,7 @@ import { ApprovalStore, componentScope, queryAuditLog, verifyAuditLog } from "@h
 import { buildRoutes } from "../src/api.js";
 import { createConsoleServer } from "../src/http.js";
 import { closeStores } from "../src/model/server.js";
+import { publishSurface, tool, writeGatewayFixture, type GatewayFixture } from "./fixtures/gateway.js";
 
 /**
  * The exposure switch, over the API the console actually uses.
@@ -27,112 +28,59 @@ let server: Server;
 let port: number;
 let cookies = "";
 let csrf = "";
+let fixture: GatewayFixture;
+let silent: GatewayFixture;
 
-const TOOLS = {
-  version: 1,
-  api: { title: "Billing", version: "1.0.0", base_url: "https://api.example.com" },
-  auth: { kind: "none" },
-  tools: [
-    {
-      name: "list_invoices",
-      description: "List invoices.",
-      effect: "read",
-      method: "GET",
-      path: "/invoices",
-      inputSchema: { type: "object", properties: {}, additionalProperties: false },
-      bindings: {},
-      bodyMode: "none",
-      tenantParams: [],
-      annotations: { readOnlyHint: true }
-    },
-    {
-      name: "create_invoice",
-      description: "Create an invoice.",
-      effect: "write",
-      method: "POST",
-      path: "/invoices",
-      inputSchema: { type: "object", properties: { amount: { type: "integer" } }, additionalProperties: false },
-      bindings: { amount: { in: "body", name: "amount" } },
-      bodyMode: "json",
-      tenantParams: [],
-      annotations: {}
-    },
-    {
-      name: "delete_invoice",
-      description: "Delete an invoice.",
-      effect: "destructive",
-      method: "DELETE",
-      path: "/invoices/{id}",
-      inputSchema: { type: "object", properties: { id: { type: "string" } }, additionalProperties: false },
-      bindings: { id: { in: "path", name: "id" } },
-      bodyMode: "none",
-      tenantParams: [],
-      annotations: { destructiveHint: true }
-    }
-  ]
-};
+/** The surface a running gateway would publish for these cases. */
+const SURFACE = [
+  tool("list_invoices", { effect: "read", description: "List invoices.", rawDescription: "List invoices." }),
+  tool("create_invoice", {
+    effect: "write",
+    description: "Create an invoice.",
+    rawDescription: "Create an invoice.",
+    inputSchema: { type: "object", properties: { amount: { type: "integer" } }, additionalProperties: false }
+  }),
+  tool("delete_invoice", {
+    effect: "destructive",
+    description: "Delete an invoice.",
+    rawDescription: "Delete an invoice.",
+    inputSchema: { type: "object", properties: { id: { type: "string" } }, additionalProperties: false }
+  })
+];
 
 beforeAll(async () => {
   dir = mkdtempSync(join(tmpdir(), "hmcp-exposure-"));
-  auditPath = join(dir, "audit.jsonl");
-  storePath = join(dir, "approvals.sqlite");
 
-  const serverDir = join(dir, "srv");
-  mkdirSync(serverDir, { recursive: true });
-  writeFileSync(join(serverDir, "tools.json"), JSON.stringify(TOOLS));
-  writeFileSync(
-    join(serverDir, "policy.yaml"),
-    [
-      "version: 1",
-      "defaults:",
-      "  mode: approve-writes",
-      "rules:",
-      "  - id: allow-reads",
-      '    match: "list_*"',
-      "    effect: read",
-      "    decision: allow",
-      "  - id: create-invoice",
-      "    match: create_invoice",
-      "    effect: write",
-      "    decision: approve",
-      "  - id: no-deletes",
-      '    match: "delete_*"',
-      "    decision: deny",
-      "    reason: this deployment never deletes invoices",
-      "egress:",
-      '  allow: ["api.example.com"]',
-      "approvals:",
-      "  mode: cli",
-      `  store_path: ${storePath}`,
-      "audit:",
-      "  enabled: true",
-      `  path: ${auditPath}`,
-      "  hash_chain: true",
-      ""
-    ].join("\n")
-  );
+  fixture = writeGatewayFixture(join(dir, "gw"), {
+    id: "srv",
+    mode: "approve-writes",
+    audit: true,
+    hashChain: true,
+    rules: [
+      "- id: allow-reads",
+      '  match: "list_*"',
+      "  effect: read",
+      "  decision: allow",
+      "- id: create-invoice",
+      "  match: create_invoice",
+      "  effect: write",
+      "  decision: approve",
+      "- id: no-deletes",
+      '  match: "delete_*"',
+      "  decision: deny",
+      "  reason: this deployment never deletes invoices"
+    ]
+  });
+  auditPath = fixture.auditPath;
+  storePath = fixture.storePath;
+  publishSurface(fixture, SURFACE);
 
-  // A gateway too, to assert the switch is refused for a surface the console
-  // does not own.
-  const gatewayPath = join(dir, "gateway.yaml");
-  writeFileSync(
-    gatewayPath,
-    ["version: 1", "name: notes", "upstreams: []", "policy:", "  version: 1", "  defaults:", "    mode: read-only", ""].join(
-      "\n"
-    )
-  );
+  // A second gateway that has never published, to assert the switch refuses a
+  // surface it cannot confirm rather than writing against a guess.
+  silent = writeGatewayFixture(join(dir, "silent"), { id: "quiet", name: "quiet" });
 
   const registryPath = join(dir, "servers.json");
-  writeFileSync(
-    registryPath,
-    JSON.stringify({
-      version: 1,
-      servers: [
-        { id: "srv", kind: "generated", label: "S", dir: serverDir, added_at: new Date().toISOString() },
-        { id: "gw", kind: "gateway", label: "G", config_path: gatewayPath, added_at: new Date().toISOString() }
-      ]
-    })
-  );
+  writeFileSync(registryPath, JSON.stringify({ version: 1, servers: [fixture.entry, silent.entry] }));
 
   const make = (p: number) =>
     createConsoleServer({
@@ -182,6 +130,15 @@ async function api(path: string, init: RequestInit = {}): Promise<Response> {
 const setExposure = (tool: string, body: Record<string, unknown>, id = "srv") =>
   api(`/api/v1/servers/${id}/tools/${tool}/exposure`, { method: "PUT", body: JSON.stringify(body) });
 
+/*
+ * The console believes a published surface only while a gateway is still
+ * announcing itself, and that window is seven seconds. Refreshing it per case
+ * keeps these about the switch rather than about how long the suite took.
+ */
+beforeEach(() => {
+  publishSurface(fixture, SURFACE);
+});
+
 async function toolFromProtection(name: string) {
   const protection = await (await api("/api/v1/servers/srv/protection")).json();
   return protection.tools.find((t: { name: string }) => t.name === name);
@@ -216,11 +173,11 @@ describe("switching a function off", () => {
   it("writes a row the running server will read, scoped to that server", async () => {
     const store = new ApprovalStore(storePath, dir);
     try {
-      expect(store.scoped(componentScope("generated:Billing")).toolExposure("create_invoice")).toBeDefined();
-      expect(store.scoped(componentScope("generated:Payroll")).toolExposure("create_invoice")).toBeUndefined();
+      expect(store.scoped(componentScope(fixture.component)).toolExposure("create_invoice")).toBeDefined();
+      expect(store.scoped(componentScope("gateway:other")).toolExposure("create_invoice")).toBeUndefined();
       // And the axis the component key alone could never express.
       expect(
-        store.scoped({ component: "generated:Billing", tenant: "acme" }).toolExposure("create_invoice")
+        store.scoped({ component: fixture.component, tenant: "acme" }).toolExposure("create_invoice")
       ).toBeUndefined();
     } finally {
       store.close();
@@ -283,10 +240,43 @@ describe("what the switch refuses", () => {
     expect(res.status).toBe(404);
   });
 
-  it("refuses a gateway, whose surface belongs to its upstreams", async () => {
-    const res = await setExposure("notes__get_note", { disabled: true }, "gw");
+  it("refuses a gateway that has never said what it serves", async () => {
+    // The switch is available for a gateway now, but only against a tool list
+    // a live process has published. Writing a row from a guessed name is the
+    // failure this refuses: it would read as protection and guard nothing.
+    const res = await setExposure("get_note", { disabled: true }, "quiet");
     expect(res.status).toBe(422);
-    expect((await res.json()).error.message).toMatch(/gateway/);
+    expect((await res.json()).error.message).toMatch(/has published a tool surface/);
+  });
+
+  it("refuses a gateway whose process has stopped announcing itself", async () => {
+    // Rows are there, but nothing live claims them, so the list cannot be
+    // confirmed as current.
+    publishSurface(fixture, SURFACE, { lastSeen: Date.now() - 60_000 });
+    const res = await setExposure("create_invoice", { disabled: true, reason: "stale" });
+    expect(res.status).toBe(422);
+    expect((await res.json()).error.message).toMatch(/no running gateway/);
+  });
+
+  it("refuses a tool a different process published", async () => {
+    // Two gateways sharing a component would otherwise blend into a surface
+    // neither serves.
+    publishSurface(fixture, SURFACE, { pid: 9999, lastSeen: Date.now() });
+    const store = new ApprovalStore(storePath, dir);
+    try {
+      store.recordRuntimeState({
+        component: fixture.component,
+        pid: 1234,
+        started_at: Date.now(),
+        last_seen: Date.now(),
+        policy_digest: "d",
+        policy_path: fixture.configPath
+      });
+    } finally {
+      store.close();
+    }
+    const res = await setExposure("create_invoice", { disabled: true, reason: "other pid" });
+    expect(res.status).toBe(422);
   });
 
   it("refuses a body that does not say which way the switch goes", async () => {
@@ -313,9 +303,13 @@ describe("what the switch refuses", () => {
     expect(res.status).toBe(401);
   });
 
-  it("never echoes anything but the tool's own state", async () => {
+  it("never echoes anything but the tool's own state and the scope it wrote", async () => {
     const body = await (await setExposure("list_invoices", { disabled: true, reason: "x" })).json();
-    expect(Object.keys(body).sort()).toEqual(["changed", "tool", "warning"]);
+    // The tenant is part of the write's own identity, not someone else's
+    // state: a caller has to be able to see which scope the switch landed in,
+    // because landing in the wrong one is the failure that looks like success.
+    expect(Object.keys(body).sort()).toEqual(["changed", "explicitTenant", "tenant", "tool", "warning"]);
+    expect(body.tenant).toBe("");
     await setExposure("list_invoices", { disabled: false });
   });
 });

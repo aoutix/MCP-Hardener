@@ -3,11 +3,13 @@ import {
   AuditLog,
   applyExposureChange,
   MAX_GRANT_TTL_SECONDS,
+  NO_TENANT,
   grantMatches,
   parseExposureChange,
   parseGrantDraft,
   queryAuditLog,
   readRegistry,
+  runtimeStateIsLive,
   verifyAuditLog,
   writeRegistry,
   type ApprovalRow,
@@ -19,8 +21,16 @@ import {
 } from "@hmcp/core";
 import { badRequest, conflict, notFound, route, unprocessable, type Route } from "./http.js";
 import { buildProtection, effectiveReach, recentActivity, toolProtection } from "./model/protection.js";
-import { invalidateScan, runScan } from "./model/scan.js";
-import { loadServer, scopeOf, scopedFor, storeFor, type LoadedServer } from "./model/server.js";
+import {
+  chooseTenant,
+  knownTenants,
+  loadServer,
+  scopeFor,
+  scopedFor,
+  storeFor,
+  type LoadedServer
+} from "./model/server.js";
+import { surfaceWritable, toolSurfaceFor } from "./model/tools.js";
 import { ENFORCEMENT_PIPELINE } from "./model/pipeline.js";
 
 export interface ApiOptions {
@@ -46,6 +56,25 @@ function serverById(options: ApiOptions, id: string): LoadedServer {
     if ((err as { status?: number }).status) throw err;
     throw unprocessable(`server "${id}" could not be loaded: ${(err as Error).message}`);
   }
+}
+
+/**
+ * One server, and the tenant whose rows this request is about.
+ *
+ * Every scoped route goes through this rather than resolving a tenant of its
+ * own, so no route can be written that forgets to and quietly falls back to the
+ * empty tenant. `chooseTenant` refuses where the console cannot legitimately
+ * know the answer, and the refusal surfaces as a 422 explaining how to name one.
+ */
+function scopedRequest(
+  options: ApiOptions,
+  id: string,
+  query: URLSearchParams
+): { server: LoadedServer; tenant: string; explicit: boolean } {
+  const server = serverById(options, id);
+  const choice = chooseTenant(server, query.get("tenant"));
+  if (!choice.ok) throw unprocessable(choice.why);
+  return { server, tenant: choice.tenant, explicit: choice.explicit };
 }
 
 /** An audit log scoped to one server's own configuration. */
@@ -152,7 +181,24 @@ export function buildRoutes(options: ApiOptions): Route[] {
         "Names are redacted by name, not by content, so a value may be harmless and still hidden. " +
         "An argument called `session` is redacted for this reason. The original values were never " +
         "written to disk, so nothing here can be un-redacted.",
-      grantTtlMaxSeconds: MAX_GRANT_TTL_SECONDS
+      grantTtlMaxSeconds: MAX_GRANT_TTL_SECONDS,
+      /*
+       * The audit vocabulary, served for the same reason the markers are: these
+       * are core's enums, and the filter UI had its own copy of both lists. A
+       * value added to `DecisionKind` would have been unfilterable until
+       * someone noticed the dropdown was short.
+       */
+      decisions: [
+        { value: "allow", label: "allowed" },
+        { value: "approve", label: "approved" },
+        { value: "deny", label: "denied" }
+      ],
+      outcomes: [
+        { value: "completed", label: "completed" },
+        { value: "denied", label: "denied" },
+        { value: "pending-approval", label: "held for approval" },
+        { value: "error", label: "error" }
+      ]
     })),
 
     /* servers */
@@ -161,22 +207,40 @@ export function buildRoutes(options: ApiOptions): Route[] {
       registry(options).servers.map((entry) => {
         try {
           const server = loadServer(entry);
-          const scan = runScan(server);
+          /*
+           * The inventory is process-wide, so the tool count needs no tenant.
+           * Reach does: it subtracts whatever that tenant switched off. Where
+           * the console cannot know which tenant to speak for, it says so with
+           * a null rather than quietly reporting the empty tenant's answer as
+           * the gateway's.
+           */
+          const choice = chooseTenant(server, null);
+          const surface = toolSurfaceFor(server, choice.ok ? choice.tenant : NO_TENANT);
+          const announced = storeFor(server).runtimeState(server.component);
           return {
             id: entry.id,
             kind: entry.kind,
             label: entry.label,
             ok: true,
             component: server.component,
-            api: server.tools ? { title: server.tools.api.title, baseUrl: server.tools.api.base_url } : null,
-            toolCount: server.tools?.tools.length ?? null,
+            upstreams: server.gateway.config.upstreams.map((u) => u.name),
+            /*
+             * Null, not zero, when nothing has been published. A gateway that
+             * has not reported is not a gateway serving no tools, and the two
+             * used to be the same number here.
+             */
+            toolCount: surface.live ? surface.entries.length : null,
+            surfaceLive: surface.live,
+            surfaceStale: surface.stale,
             posture: server.policy.defaults.mode,
-            reach: effectiveReach(server),
+            reach: choice.ok ? effectiveReach(server, choice.tenant, surface) : null,
+            tenantScope: choice.ok ? choice.tenant : null,
+            tenantRequired: !choice.ok,
+            tenantHint: choice.ok ? null : choice.why,
+            running: announced !== undefined && runtimeStateIsLive(announced),
             auditPath: server.auditPath,
             storePath: server.storePath,
-            tenantError: server.tenantError,
-            counts: scan.counts,
-            scanOk: scan.ok
+            tenantError: server.tenantError
           };
         } catch (err) {
           // A broken entry is listed with its error. Failing the whole list
@@ -212,26 +276,51 @@ export function buildRoutes(options: ApiOptions): Route[] {
       if (!reg.servers.some((s) => s.id === id)) throw notFound(`no registered server with id "${id}"`);
       // Only the registry entry is removed; the referenced files are never touched.
       writeRegistry({ ...reg, servers: reg.servers.filter((s) => s.id !== id) }, options.registryPath);
-      invalidateScan(id);
       return { removed: id };
     }),
 
     /* tools and protection */
 
-    route("GET", "/api/v1/servers/:id/protection", (ctx) => buildProtection(serverById(options, ctx.params["id"]!))),
+    /**
+     * Which tenants this gateway has any trace of.
+     *
+     * Served so the console can offer a choice instead of a blank box, and so
+     * nothing in the UI has to carry a tenant list of its own. Historical, not
+     * authoritative: a tenant that has never made a call or had a row written
+     * will not be here, which is why naming one directly stays possible.
+     */
+    route("GET", "/api/v1/servers/:id/tenants", (ctx) => {
+      const server = serverById(options, ctx.params["id"]!);
+      const config = server.policy.tenant;
+      const assumed = chooseTenant(server, null);
+      return {
+        tenants: knownTenants(server),
+        configured: config !== null && config !== undefined,
+        sourceKind: config?.source.kind ?? null,
+        required: config?.required ?? false,
+        /** Null when the request has to name one. */
+        assumed: assumed.ok ? assumed.tenant : null,
+        whyNotAssumed: assumed.ok ? null : assumed.why
+      };
+    }),
+
+    route("GET", "/api/v1/servers/:id/protection", (ctx) => {
+      const { server, tenant, explicit } = scopedRequest(options, ctx.params["id"]!, ctx.query);
+      return buildProtection(server, tenant, explicit);
+    }),
 
     route("GET", "/api/v1/servers/:id/tools", (ctx) => {
-      const protection = buildProtection(serverById(options, ctx.params["id"]!));
-      return protection.tools;
+      const { server, tenant, explicit } = scopedRequest(options, ctx.params["id"]!, ctx.query);
+      return buildProtection(server, tenant, explicit).tools;
     }),
 
     route("GET", "/api/v1/servers/:id/tools/:tool", (ctx) => {
-      const server = serverById(options, ctx.params["id"]!);
+      const { server, tenant, explicit } = scopedRequest(options, ctx.params["id"]!, ctx.query);
       const name = ctx.params["tool"]!;
-      const tool = buildProtection(server).tools.find((t) => t.name === name);
+      const tool = buildProtection(server, tenant, explicit).tools.find((t) => t.name === name);
       if (!tool) throw notFound(`no tool "${name}" on server "${server.entry.id}"`);
-      const descriptor = server.tools?.tools.find((t) => t.name === name);
-      return { ...tool, inputSchema: descriptor?.inputSchema ?? null, activity: recentActivity(server, name) };
+      const entry = toolSurfaceFor(server, tenant).entries.find((t) => t.name === name);
+      return { ...tool, inputSchema: entry?.inputSchema ?? null, activity: recentActivity(server, name) };
     }),
 
     /**
@@ -248,27 +337,27 @@ export function buildRoutes(options: ApiOptions): Route[] {
      * all without writing to `policy.yaml`.
      */
     route("PUT", "/api/v1/servers/:id/tools/:tool/exposure", (ctx) => {
-      const server = serverById(options, ctx.params["id"]!);
+      const { server, tenant, explicit } = scopedRequest(options, ctx.params["id"]!, ctx.query);
       const name = ctx.params["tool"]!;
 
       /*
-       * A gateway now honours overrides -- it reads the same rows at dispatch
-       * and withdraws a switched-off tool from its listing. What the console
-       * cannot do is name the tools: a gateway's surface is discovered by
-       * connecting to its upstreams, and registering a server here
-       * deliberately does not spawn them. So the refusal is about not knowing
-       * the tool exists, not about the override having no effect.
+       * The tool name is checked against what a *live* gateway says it is
+       * serving, which is the whole reason this route can exist at all now.
+       * A name taken from a stale list would write a row that reads as
+       * protection and guards nothing -- the gateway's own admin API refuses
+       * for exactly this reason before it writes.
        */
-      if (!server.tools) {
-        throw unprocessable(
-          `"${server.entry.id}" is a gateway, and its tool surface is discovered by connecting to its ` +
-            "upstreams, which the console deliberately does not do. The gateway honours exposure overrides; " +
-            'flip one with "hmcp-gateway exposure off <tool>", or through the gateway\'s own /admin/v1 API ' +
-            "if it is serving HTTP with an admin scope configured."
+      const surface = toolSurfaceFor(server, tenant);
+      const writable = surfaceWritable(surface);
+      if (!writable.ok) throw unprocessable(`cannot change exposure for "${server.entry.id}": ${writable.why}`);
+
+      const entry = surface.entries.find((t) => t.name === name);
+      if (!entry) {
+        throw notFound(
+          `no tool "${name}" in what "${server.entry.id}" is currently serving. ` +
+            `Its upstreams advertise: ${surface.entries.map((t) => t.name).join(", ") || "nothing"}.`
         );
       }
-      const descriptor = server.tools.tools.find((t) => t.name === name);
-      if (!descriptor) throw notFound(`no tool "${name}" on server "${server.entry.id}"`);
 
       const body = (ctx.body ?? {}) as Record<string, unknown>;
       let change;
@@ -278,7 +367,7 @@ export function buildRoutes(options: ApiOptions): Route[] {
         throw unprocessable(`invalid exposure change: ${(err as Error).message}`);
       }
 
-      const scoped = scopedFor(server);
+      const scoped = scopedFor(server, tenant);
       /*
        * The disable-keeps / enable-rolls-back asymmetry lives in core, because
        * the gateway's admin API and its CLI flip the same bit and three
@@ -289,51 +378,41 @@ export function buildRoutes(options: ApiOptions): Route[] {
         audit: auditFor(server, ctx.actor),
         change,
         actor: ctx.actor,
-        effect: descriptor.effect,
-        channel: "the console"
+        effect: entry.effect ?? undefined,
+        channel: `the console, for tenant ${tenant === "" ? "(none)" : tenant}`
       });
 
-      const scan = runScan(server);
-      const tool = toolProtection(
-        server,
-        descriptor,
-        scan.findings,
-        scoped.listGrants({ activeOnly: true }),
-        scoped.toolExposure(name)
-      );
-      return { tool, changed, warning };
-    }),
-
-    route("GET", "/api/v1/servers/:id/scan", (ctx) => {
-      const server = serverById(options, ctx.params["id"]!);
-      if (ctx.query.get("refresh")) invalidateScan(server.entry.id);
-      return runScan(server);
+      // Re-read, so the row returned reflects the write that just happened
+      // rather than the surface as it was before it.
+      const updated = toolSurfaceFor(server, tenant).entries.find((t) => t.name === name) ?? entry;
+      const tool = toolProtection(server, updated, scoped.listGrants({ activeOnly: true }));
+      return { tool, changed, warning, tenant, explicitTenant: explicit };
     }),
 
     /* approvals */
 
     route("GET", "/api/v1/servers/:id/approvals/pending", (ctx) => {
-      const server = serverById(options, ctx.params["id"]!);
-      return scopedFor(server)
+      const { server, tenant } = scopedRequest(options, ctx.params["id"]!, ctx.query);
+      return scopedFor(server, tenant)
         .listPending(intParam(ctx.query, "limit") ?? 50)
         .map(approvalDto);
     }),
 
     route("GET", "/api/v1/servers/:id/approvals", (ctx) => {
-      const server = serverById(options, ctx.params["id"]!);
-      return scopedFor(server)
+      const { server, tenant } = scopedRequest(options, ctx.params["id"]!, ctx.query);
+      return scopedFor(server, tenant)
         .list(intParam(ctx.query, "limit") ?? 50)
         .map(approvalDto);
     }),
 
     route("POST", "/api/v1/servers/:id/approvals/:aprId/decide", (ctx) => {
-      const server = serverById(options, ctx.params["id"]!);
+      const { server, tenant } = scopedRequest(options, ctx.params["id"]!, ctx.query);
       const body = (ctx.body ?? {}) as { state?: unknown; note?: unknown };
       if (body.state !== "granted" && body.state !== "denied") {
         throw badRequest('state must be "granted" or "denied"');
       }
       const note = typeof body.note === "string" ? body.note : "";
-      const result = scopedFor(server).decideChecked(ctx.params["aprId"]!, body.state, ctx.actor, note);
+      const result = scopedFor(server, tenant).decideChecked(ctx.params["aprId"]!, body.state, ctx.actor, note);
       if (!result.ok) {
         throw result.error.includes("no approval request") ? notFound(result.error) : conflict(result.error);
       }
@@ -357,15 +436,15 @@ export function buildRoutes(options: ApiOptions): Route[] {
     /* standing grants */
 
     route("GET", "/api/v1/servers/:id/grants", (ctx) => {
-      const server = serverById(options, ctx.params["id"]!);
+      const { server, tenant } = scopedRequest(options, ctx.params["id"]!, ctx.query);
       const activeOnly = ctx.query.get("state") === "active";
-      return scopedFor(server)
+      return scopedFor(server, tenant)
         .listGrants({ activeOnly, limit: intParam(ctx.query, "limit") ?? 100 })
         .map(grantDto);
     }),
 
     route("POST", "/api/v1/servers/:id/grants", (ctx) => {
-      const server = serverById(options, ctx.params["id"]!);
+      const { server, tenant } = scopedRequest(options, ctx.params["id"]!, ctx.query);
       const body = (ctx.body ?? {}) as Record<string, unknown>;
 
       // Accept a TTL and derive the deadline, which is what a form can express.
@@ -387,7 +466,7 @@ export function buildRoutes(options: ApiOptions): Route[] {
         throw unprocessable((err as Error).message);
       }
 
-      const scoped = scopedFor(server);
+      const scoped = scopedFor(server, tenant);
       const grant = scoped.createGrant(draft);
 
       // The requirement is that no pre-approval exists unaudited, so this uses
@@ -422,8 +501,8 @@ export function buildRoutes(options: ApiOptions): Route[] {
     }),
 
     route("DELETE", "/api/v1/servers/:id/grants/:grantId", (ctx) => {
-      const server = serverById(options, ctx.params["id"]!);
-      const scoped = scopedFor(server);
+      const { server, tenant } = scopedRequest(options, ctx.params["id"]!, ctx.query);
+      const scoped = scopedFor(server, tenant);
       const id = ctx.params["grantId"]!;
       const existing = scoped.getGrant(id);
       if (!existing) throw notFound(`no standing grant with id "${id}"`);
@@ -456,9 +535,16 @@ export function buildRoutes(options: ApiOptions): Route[] {
      * honest — you see the blast radius before you create the grant.
      */
     route("POST", "/api/v1/servers/:id/grants/preview", (ctx) => {
-      const server = serverById(options, ctx.params["id"]!);
+      const { server, tenant } = scopedRequest(options, ctx.params["id"]!, ctx.query);
       const body = (ctx.body ?? {}) as Record<string, unknown>;
-      const descriptors = server.tools?.tools ?? [];
+      /*
+       * The point of a preview is to show the blast radius before a grant is
+       * created, so an empty list has to mean "covers nothing" and nothing
+       * else. Reading an unpublished surface would have it quietly claim that
+       * about a grant covering every tool the gateway serves.
+       */
+      const surface = toolSurfaceFor(server, tenant);
+      const writable = surfaceWritable(surface);
 
       const ttl = Number(body["ttl_seconds"]);
       const expires = Number.isFinite(ttl) ? Date.now() + ttl * 1000 : Date.now() + 3600_000;
@@ -480,7 +566,7 @@ export function buildRoutes(options: ApiOptions): Route[] {
 
       const candidate: StandingGrantRow = {
         id: "sg_preview",
-        ...scopeOf(server),
+        ...scopeFor(server, tenant),
         created_at: Date.now(),
         expires_at: draft.expires_at,
         tool_match: draft.tool_match,
@@ -497,9 +583,11 @@ export function buildRoutes(options: ApiOptions): Route[] {
 
       return {
         expiresAt: draft.expires_at,
-        tools: descriptors.map((d) => {
-          const match = grantMatches(candidate, d.name, d.effect, {});
-          return { name: d.name, effect: d.effect, covers: match.matches, why: match.reason };
+        surfaceKnown: writable.ok,
+        surfaceUnknownWhy: writable.ok ? null : writable.why,
+        tools: surface.entries.map((entry) => {
+          const match = grantMatches(candidate, entry.name, entry.effect, {});
+          return { name: entry.name, effect: entry.effect, covers: match.matches, why: match.reason };
         })
       };
     }),

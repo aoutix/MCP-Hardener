@@ -21,7 +21,6 @@
   },
   "dependencies": {
     "@hmcp/core": "0.1.0",
-    "@hmcp/server-runtime": "0.1.0",
     "@hmcp/scanner": "0.1.0",
     "hmcp-gateway": "0.1.0",
     "commander": "^15.0.0",

@@ -16,6 +16,11 @@ import { EXPOSURE_SCHEMA, type ToolExposureRow } from "./exposure.js";
 import { migrate } from "./migrate.js";
 import type { Scope } from "./tenant.js";
 import { RUNTIME_STATE_SCHEMA, type RuntimeStateRow } from "./runtime-state.js";
+import {
+  TOOL_INVENTORY_SCHEMA,
+  type ToolInventoryInput,
+  type ToolInventoryRow
+} from "./inventory.js";
 
 export type ApprovalState = "pending" | "granted" | "denied" | "used" | "expired";
 
@@ -108,6 +113,7 @@ export class ApprovalStore {
       db.exec(GRANTS_SCHEMA);
       db.exec(EXPOSURE_SCHEMA);
       db.exec(RUNTIME_STATE_SCHEMA);
+      db.exec(TOOL_INVENTORY_SCHEMA);
     });
   }
 
@@ -259,6 +265,75 @@ export class ApprovalStore {
   runtimeState(component: string): RuntimeStateRow | undefined {
     const row = this.db.prepare("SELECT * FROM runtime_state WHERE component = ?").get(component);
     return row ? ({ ...row } as unknown as RuntimeStateRow) : undefined;
+  }
+
+  // ---- tool inventory --------------------------------------------------
+  //
+  // Also keyed by component rather than tenant, and for the same reason: a
+  // gateway's upstreams offer one set of tools to every tenant it serves.
+
+  /**
+   * Replaces everything this component publishes with what it is serving now.
+   *
+   * Delete-then-insert in one transaction, so a tool an upstream stopped
+   * offering disappears rather than lingering as a row a reader would present
+   * as current. A partial write is the one outcome worth ruling out: half a
+   * tool list is indistinguishable from a gateway that genuinely narrowed.
+   */
+  publishInventory(component: string, pid: number, tools: readonly ToolInventoryInput[], now = Date.now()): void {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.prepare("DELETE FROM tool_inventory WHERE component = ?").run(component);
+      const insert = this.db.prepare(
+        `INSERT INTO tool_inventory
+           (component, tool, pid, upstream, effect, effect_source, description,
+            raw_description, input_schema, hidden, injection, discovered_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      );
+      for (const tool of tools) {
+        insert.run(
+          component,
+          tool.tool,
+          pid,
+          tool.upstream,
+          tool.effect ?? null,
+          tool.effectSource,
+          tool.description,
+          tool.rawDescription,
+          JSON.stringify(tool.inputSchema ?? { type: "object" }),
+          tool.hidden ? 1 : 0,
+          tool.injection && tool.injection.length > 0 ? JSON.stringify(tool.injection) : null,
+          now
+        );
+      }
+      this.db.exec("COMMIT");
+    } catch (err) {
+      this.db.exec("ROLLBACK");
+      throw err;
+    }
+  }
+
+  /**
+   * What this component last published.
+   *
+   * Unfiltered by pid on purpose: a caller that cares which process wrote these
+   * rows has to compare them against `runtimeState(component)` anyway, and
+   * silently returning nothing would be indistinguishable from a gateway that
+   * has never run. `inventoryPid` is the cheap form of that question.
+   */
+  inventory(component: string): ToolInventoryRow[] {
+    return this.db
+      .prepare("SELECT * FROM tool_inventory WHERE component = ? ORDER BY tool")
+      .all(component)
+      .map((row) => ({ ...row }) as unknown as ToolInventoryRow);
+  }
+
+  /** Which process wrote the rows this component published, if any. */
+  inventoryPid(component: string): number | undefined {
+    const row = this.db.prepare("SELECT pid FROM tool_inventory WHERE component = ? LIMIT 1").get(component) as
+      | { pid?: number }
+      | undefined;
+    return row?.pid;
   }
 }
 

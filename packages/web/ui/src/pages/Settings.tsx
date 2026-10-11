@@ -13,6 +13,13 @@ import {
   useResource
 } from "../components";
 
+/*
+ * Offered only up to the ceiling the server reports.
+ *
+ * The last of these used to sit exactly on `MAX_GRANT_TTL_SECONDS`, so any
+ * future tightening in core would have had the UI offer a preset the API then
+ * refused with a 422. The ceiling is served, so it is read.
+ */
 const TTL_PRESETS = [
   { label: "1 hour", seconds: 3600 },
   { label: "8 hours", seconds: 8 * 3600 },
@@ -37,14 +44,14 @@ interface Constraint {
  * to a human, so it can spare the human a question but never answer one they
  * were never asked.
  */
-export function Settings({ serverId }: { serverId: string }) {
-  const grants = useResource(() => api.grants(serverId), [serverId], 15000);
+export function Settings({ serverId, tenant }: { serverId: string; tenant: string | null }) {
+  const grants = useResource(() => api.grants(serverId, tenant), [serverId, tenant], 15000);
   const [failure, setFailure] = useState<string | null>(null);
 
   async function revoke(id: string) {
     setFailure(null);
     try {
-      const result = await api.revokeGrant(serverId, id);
+      const result = await api.revokeGrant(serverId, id, tenant);
       if (result.warning) setFailure(result.warning);
       grants.reload();
     } catch (err) {
@@ -65,11 +72,19 @@ export function Settings({ serverId }: { serverId: string }) {
         is still a decision to stop reviewing something. Keep them narrow and short.
       </Banner>
 
-      <GrantEditor serverId={serverId} onCreated={grants.reload} />
+      <GrantEditor serverId={serverId} tenant={tenant} onCreated={grants.reload} />
 
       <Panel title={`${active.length} active pre-approval(s)`}>
         {active.length === 0 ? (
-          <Empty>Nothing is pre-approved. Every write will be held for a human.</Empty>
+          /*
+           * What policy does with an unapproved write is policy's business, and
+           * it is not always "hold it": this used to assert a human reviews
+           * every write, which is false whenever a rule allows one outright.
+           */
+          <Empty>
+            Nothing is pre-approved. Writes are handled by policy alone — see the Protection tab for what that
+            means on this gateway.
+          </Empty>
         ) : (
           <div className="space-y-2">
             {active.map((g) => (
@@ -143,16 +158,35 @@ function GrantCard({ grant, onRevoke }: { grant: Grant; onRevoke?: () => void })
   );
 }
 
-function GrantEditor({ serverId, onCreated }: { serverId: string; onCreated: () => void }) {
+function GrantEditor({
+  serverId,
+  tenant,
+  onCreated
+}: {
+  serverId: string;
+  tenant: string | null;
+  onCreated: () => void;
+}) {
   const [toolMatch, setToolMatch] = useState("");
   const [effect, setEffect] = useState("");
   const [ttl, setTtl] = useState(3600);
   const [maxUses, setMaxUses] = useState("5");
   const [reason, setReason] = useState("");
   const [constraints, setConstraints] = useState<Constraint[]>([]);
-  const [preview, setPreview] = useState<{ name: string; effect: string; covers: boolean; why: string }[] | null>(null);
+  const [preview, setPreview] = useState<
+    { name: string; effect: string | null; covers: boolean; why: string }[] | null
+  >(null);
+  const [surfaceKnown, setSurfaceKnown] = useState(true);
+  const [surfaceUnknownWhy, setSurfaceUnknownWhy] = useState<string | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  /* The gateway's own tool list and the grant ceiling, both served. */
+  const tools = useResource(() => api.tools(serverId, tenant), [serverId, tenant]);
+  const meta = useResource(() => api.redaction(), []);
+  const surface = tools.data ?? [];
+  const ttlCeiling = meta.data?.grantTtlMaxSeconds ?? Number.POSITIVE_INFINITY;
+  const presets = TTL_PRESETS.filter((p) => p.seconds <= ttlCeiling);
 
   function body() {
     const parsed: Record<string, Record<string, unknown>> = {};
@@ -190,10 +224,12 @@ function GrantEditor({ serverId, onCreated }: { serverId: string; onCreated: () 
     let live = true;
     const id = setTimeout(() => {
       api
-        .previewGrant(serverId, { ...body(), reason: reason || "preview" })
+        .previewGrant(serverId, { ...body(), reason: reason || "preview" }, tenant)
         .then((result) => {
           if (!live) return;
           setPreview(result.tools);
+          setSurfaceKnown(result.surfaceKnown);
+          setSurfaceUnknownWhy(result.surfaceUnknownWhy);
           setProblem(null);
         })
         .catch((err: Error) => {
@@ -213,7 +249,7 @@ function GrantEditor({ serverId, onCreated }: { serverId: string; onCreated: () 
     setBusy(true);
     setProblem(null);
     try {
-      await api.createGrant(serverId, body());
+      await api.createGrant(serverId, body(), tenant);
       setToolMatch("");
       setReason("");
       setConstraints([]);
@@ -228,6 +264,13 @@ function GrantEditor({ serverId, onCreated }: { serverId: string; onCreated: () 
 
   const covered = preview?.filter((t) => t.covers) ?? [];
 
+  /*
+   * A pattern suggestion taken from the surface rather than invented. The
+   * placeholder used to name `create_invoice`, a tool from an example spec that
+   * no gateway here serves.
+   */
+  const toolHint = surface.length > 0 ? `${surface[0]!.name} or ${surface[0]!.name.split("_")[0]}_*` : "name or glob";
+
   return (
     <Panel title="Pre-approve a class of request" subtitle="Nothing is saved until you create it.">
       <div className="grid gap-3 sm:grid-cols-2">
@@ -238,7 +281,7 @@ function GrantEditor({ serverId, onCreated }: { serverId: string; onCreated: () 
           <input
             value={toolMatch}
             onChange={(e) => setToolMatch(e.target.value)}
-            placeholder="create_invoice or {create,update}_*"
+            placeholder={toolHint}
             className="mono rounded-md border border-edge bg-surface px-2 py-1.5 text-sm"
           />
         </label>
@@ -264,7 +307,7 @@ function GrantEditor({ serverId, onCreated }: { serverId: string; onCreated: () 
             onChange={(e) => setTtl(Number(e.target.value))}
             className="rounded-md border border-edge bg-surface px-2 py-1.5 text-sm"
           >
-            {TTL_PRESETS.map((p) => (
+            {presets.map((p) => (
               <option key={p.seconds} value={p.seconds}>
                 {p.label}
               </option>
@@ -287,7 +330,7 @@ function GrantEditor({ serverId, onCreated }: { serverId: string; onCreated: () 
           <input
             value={reason}
             onChange={(e) => setReason(e.target.value)}
-            placeholder="Month-end invoicing run, approved by finance"
+            placeholder="Why this is being pre-approved, and who agreed to it"
             className="rounded-md border border-edge bg-surface px-2 py-1.5 text-sm"
           />
         </label>
@@ -327,7 +370,7 @@ function GrantEditor({ serverId, onCreated }: { serverId: string; onCreated: () 
                 <input
                   value={c.value}
                   onChange={(e) => update(i, { value: e.target.value })}
-                  placeholder={c.kind === "enum" ? "usd, eur" : "500"}
+                  placeholder={c.kind === "enum" ? "comma-separated values" : "value"}
                   className="mono w-40 rounded-md border border-edge bg-surface px-2 py-1 text-sm"
                 />
                 <Button onClick={() => setConstraints(constraints.filter((_, j) => j !== i))}>Remove</Button>
@@ -345,11 +388,23 @@ function GrantEditor({ serverId, onCreated }: { serverId: string; onCreated: () 
 
       {preview && (
         <div className="mt-3 rounded-md border border-edge bg-surface p-3">
-          <p className="text-sm font-medium">
-            {covered.length === 0
-              ? "This would cover no tool that exists on this server."
-              : `This would cover ${covered.length} tool(s) right now:`}
-          </p>
+          {/*
+           * "Covers nothing" and "we cannot tell" must not look the same here.
+           * This control releases calls without a human, so a preview that
+           * silently reported an empty surface as a narrow grant was the most
+           * dangerous wrong answer in the console.
+           */}
+          {!surfaceKnown ? (
+            <p className="text-sm font-medium text-write">
+              Cannot say what this would cover: {surfaceUnknownWhy ?? "no gateway has reported its tools."}
+            </p>
+          ) : (
+            <p className="text-sm font-medium">
+              {covered.length === 0
+                ? "This would cover no tool this gateway is currently serving."
+                : `This would cover ${covered.length} tool(s) right now:`}
+            </p>
+          )}
           {covered.length > 0 && (
             <ul className="mt-1.5 flex flex-wrap gap-1.5">
               {covered.map((t) => (
@@ -361,8 +416,8 @@ function GrantEditor({ serverId, onCreated }: { serverId: string; onCreated: () 
             </ul>
           )}
           <p className="mt-2 text-xs text-ink-soft">
-            Shown for the tools on this server today. A tool added later that matches the pattern would also
-            be covered, which is why the use cap and expiry matter.
+            Shown for the tools this gateway is serving today. A tool an upstream adds later that matches the
+            pattern would also be covered, which is why the use cap and expiry matter.
           </p>
         </div>
       )}

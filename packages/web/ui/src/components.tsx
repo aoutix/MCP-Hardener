@@ -1,11 +1,19 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import type { Reach } from "./api";
+import { api, type Reach, type RedactionMeta } from "./api";
 import { useTheme } from "./theme";
 
 /* -------------------------------------------------------------------- icons */
 
 const PATHS: Record<string, React.ReactNode> = {
+  users: (
+    <>
+      <circle cx="9" cy="8" r="3.2" />
+      <path d="M3.5 19.5c0-3 2.5-5 5.5-5s5.5 2 5.5 5" />
+      <path d="M16 6.4a3.2 3.2 0 0 1 0 6.2" />
+      <path d="M17.5 14.9c2.1.5 3.5 2.3 3.5 4.6" />
+    </>
+  ),
   servers: (
     <>
       <rect x="3" y="4" width="18" height="7" rx="2" />
@@ -216,9 +224,17 @@ function Pill({ tone, children, title }: { tone: string; children: React.ReactNo
   );
 }
 
-/** Always carries the word, never colour alone. */
-export const EffectBadge = ({ effect }: { effect: string }) => (
-  <Pill tone={EFFECT_STYLE[effect] ?? SEVERITY_STYLE["low"]!}>{effect}</Pill>
+/**
+ * Always carries the word, never colour alone.
+ *
+ * `null` is a real value from a gateway: an upstream tool nothing classified.
+ * It is named rather than rendered as an empty pill, because it is the state
+ * that gets the tool refused.
+ */
+export const EffectBadge = ({ effect }: { effect: string | null }) => (
+  <Pill tone={(effect !== null ? EFFECT_STYLE[effect] : undefined) ?? SEVERITY_STYLE["low"]!}>
+    {effect ?? "unclassified"}
+  </Pill>
 );
 
 export const VerdictBadge = ({ kind, title }: { kind: string; title?: string }) => (
@@ -605,11 +621,14 @@ export function Hint({ label, children }: { label: string; children: React.React
   );
 }
 
-export function Banner({ tone, children }: { tone: "ok" | "warn" | "bad"; children: React.ReactNode }) {
+export function Banner({ tone, children }: { tone: "ok" | "warn" | "bad" | "info"; children: React.ReactNode }) {
   const tones = {
     ok: "border-allow/40 bg-allow/10 text-allow",
     warn: "border-medium/40 bg-medium/10 text-medium",
-    bad: "border-deny/40 bg-deny/10 text-deny"
+    bad: "border-deny/40 bg-deny/10 text-deny",
+    // Neither good nor bad: states a fact the reader needs in order to read
+    // the rest of the page correctly, such as which tenant it is about.
+    info: "border-edge bg-subtle text-ink-soft"
   };
   return <div className={`rounded-md border px-3 py-2 text-sm ${tones[tone]}`}>{children}</div>;
 }
@@ -736,11 +755,37 @@ export function ThemeToggle() {
 
 /* ---------------------------------------------------------------- redaction */
 
-const REDACTION_HELP: Record<string, string> = {
-  key: "The argument's name looked like a secret, so the value was hidden by name rather than by content. A harmless value can be hidden this way.",
-  circular: "The value referred back to itself.",
-  "max-depth": "The value was nested deeper than the redactor follows."
-};
+/*
+ * The legend is served by `GET /api/v1/meta/redaction`, because the patterns
+ * live in core and a second copy here had already drifted from it. Fetched
+ * once for the page's lifetime and shared, since every chip wants the same
+ * answer and it never changes while the console is open.
+ */
+let redactionMeta: RedactionMeta | null = null;
+let redactionFetch: Promise<void> | null = null;
+
+function useRedactionHelp(): RedactionMeta | null {
+  const [meta, setMeta] = useState<RedactionMeta | null>(redactionMeta);
+  useEffect(() => {
+    if (redactionMeta) return;
+    redactionFetch ??= api
+      .redaction()
+      .then((m) => {
+        redactionMeta = m;
+      })
+      .catch(() => {
+        /* a missing legend costs the tooltip, never the record */
+      });
+    let live = true;
+    void redactionFetch.then(() => {
+      if (live) setMeta(redactionMeta);
+    });
+    return () => {
+      live = false;
+    };
+  }, []);
+  return meta;
+}
 
 /**
  * Renders a redaction marker as an explained chip.
@@ -750,9 +795,11 @@ const REDACTION_HELP: Record<string, string> = {
  * secret leaked, so each is labelled with why the value is not shown.
  */
 function RedactionChip({ pattern }: { pattern: string }) {
-  const help =
-    REDACTION_HELP[pattern] ??
-    `The value matched a known credential shape (${pattern}), so it was replaced before being written to disk.`;
+  const meta = useRedactionHelp();
+  const marker = meta?.markers.find((m) => m.marker === `[redacted:${pattern}]`);
+  const help = marker
+    ? `${marker.meaning}. ${meta!.note}`
+    : `The value matched a known credential shape (${pattern}), so it was replaced before being written to disk.`;
   return (
     <span
       title={help}

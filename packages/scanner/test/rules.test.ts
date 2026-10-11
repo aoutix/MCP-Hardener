@@ -265,7 +265,7 @@ describe("HMCP005 prompt injection", () => {
 });
 
 describe("HMCP006 permissive schema", () => {
-  it("fires on an open object, which is the case a hand-edited tools.json introduces", () => {
+  it("fires on an open object, which is what an upstream advertising a free-form argument gives", () => {
     const result = scan(
       target({
         tools: [

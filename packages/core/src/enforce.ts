@@ -1,15 +1,12 @@
-import {
-  decide,
-  EgressDenied,
-  type ApprovalBroker,
-  type AuditLog,
-  type Decision,
-  type Effect,
-  type Policy
-} from "@hmcp/core";
+import { decide } from "./decide.js";
+import { EgressDenied } from "./egress.js";
+import type { ApprovalBroker } from "./approvals.js";
+import type { AuditLog } from "./audit.js";
+import type { Decision } from "./decide.js";
+import type { Effect, Policy } from "./policy.js";
 
 /**
- * The enforcement pipeline, shared by generated servers and the gateway:
+ * The enforcement pipeline the gateway runs every upstream call through:
  * classify, decide, obtain approval if the decision calls for it, run the call,
  * and record the outcome either way. Both halves of this project call it so the
  * two cannot drift apart.

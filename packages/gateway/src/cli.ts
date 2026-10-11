@@ -31,7 +31,7 @@ program
   .action(async (options) => {
     await run(async () => {
       const { config, policy } = loadGatewayConfig(options.config as string);
-      const gateway = new Gateway({ config, policy });
+      const gateway = new Gateway({ config, policy, policyPath: options.config as string });
 
       let serving: Awaited<ReturnType<typeof serveHttp>> | undefined;
       const shutdown = async () => {
@@ -55,6 +55,7 @@ program
           throw new Error(`--http needs a port number, not ${JSON.stringify(options.http)}`);
         }
         await gateway.connectUpstreams();
+        gateway.announceServing();
         const allowHosts = options.allowHost as string[];
         serving = await serveHttp(gateway, {
           port,

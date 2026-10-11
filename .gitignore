@@ -19,9 +19,10 @@ coverage/
 secrets.json
 credentials.json
 
-# Local runtime state. The console keeps its registry, approvals and audit
-# trail in ~/.hmcp, but a server generated into the tree would put the same
-# things here, and the audit log in particular is a record of real calls.
+# Local runtime state. The console and the gateway keep their registry,
+# approvals and audit trail in ~/.hmcp, but a policy pointed into the tree
+# would put the same things here, and the audit log in particular is a record
+# of real calls.
 *.jsonl
 *.sqlite
 *.sqlite-journal
@@ -29,14 +30,9 @@ credentials.json
 *.sqlite-shm
 .hmcp/
 
-# Generated servers. Output of `hmcp-gen build`, rebuilt from a spec and a
-# manifest, and it carries the upstream base URL it was pointed at.
-/out/
-*-mcp/
-
-# `npm run demo` state: a generated server, a registry, an approvals database
-# and an audit log, all rebuilt from the examples on demand. Disposable by
-# design — the demo keeps it here precisely so it never writes into ~/.hmcp.
+# `npm run demo` state: a gateway config, a registry, an approvals database and
+# an audit log, all rebuilt from the examples on demand. Disposable by design —
+# the demo keeps it here precisely so it never writes into ~/.hmcp.
 /.demo/
 
 # Scratch
