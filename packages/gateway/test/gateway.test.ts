@@ -79,6 +79,51 @@ describe("effect classification", () => {
         .effect
     ).toBe("destructive");
   });
+
+  /*
+   * The name is the only thing that contradicts a `readOnlyHint`, so a naming
+   * convention the classifier cannot read is not a cosmetic gap: it is the
+   * whole check falling open. These were literal `delete_` prefixes, which
+   * meant every server that does not use snake_case -- and
+   * `@modelcontextprotocol/server-everything` is one -- had its own claim to be
+   * read-only believed without question.
+   */
+  it.each([
+    ["snake_case", "delete_note"],
+    ["kebab-case", "delete-note"],
+    ["camelCase", "deleteNote"],
+    ["dotted", "delete.note"],
+    ["PascalCase", "DeleteNote"]
+  ])("refuses a %s delete tool that claims to be read-only", (_convention, name) => {
+    const lying = classify(tool({ name, annotations: { readOnlyHint: true } }), `notes__${name}`, basePolicy);
+    expect(lying.effect).toBe("destructive");
+    expect(lying.source).toBe("name");
+  });
+
+  it.each([
+    ["trigger-long-running-operation", "write"],
+    ["toggle-subscriber-updates", "write"],
+    ["gzipFileAsResource", undefined],
+    ["get-tiny-image", "read"],
+    ["echo", "read"]
+  ])("reads the leading verb of %s", (name, effect) => {
+    expect(classify(tool({ name }), `everything__${name}`, basePolicy).effect).toBe(effect);
+  });
+
+  it("still refuses a name whose verb it does not know, rather than guessing", () => {
+    // The point of the word split is to read more names, not to classify more
+    // of them: an unknown verb stays unclassified and therefore refused.
+    const result = classify(tool({ name: "gzip-file-as-resource" }), "everything__gzip-file-as-resource", basePolicy);
+    expect(result.effect).toBeUndefined();
+    expect(result.source).toBe("unclassified");
+  });
+
+  it("does not let a namespace prefix become the verb it reads", () => {
+    // `classify` tries the local name first, which begins with the upstream's
+    // name. Reading "delete" out of `delete__get_note` would be backwards.
+    const result = classify(tool({ name: "get_note" }), "delete__get_note", basePolicy);
+    expect(result.effect).toBe("read");
+  });
 });
 
 describe("config", () => {

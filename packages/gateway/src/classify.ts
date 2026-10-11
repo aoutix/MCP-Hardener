@@ -3,35 +3,64 @@ import { globMatch } from "@hmcp/core";
 import type { UpstreamTool } from "./upstream.js";
 
 /**
- * Name shapes that indicate what an upstream tool does, used only as a last
+ * Leading verbs that indicate what an upstream tool does, used only as a last
  * resort. Anything these do not match stays unclassified, which under the
  * default posture means denied - a new upstream tool is not reachable until
  * someone classifies it.
+ *
+ * Matched as the first *word* of a name, not as a literal prefix, because MCP
+ * servers in the wild name tools every way at once: `delete_note`,
+ * `delete-note`, `deleteNote`, `delete.note`. These were `delete_`-style
+ * prefixes, which meant a server using any convention but snake_case got no
+ * classification from its name at all -- and that is not merely a missed hint.
+ * The name is what contradicts a `readOnlyHint`, so a kebab-case `delete-note`
+ * claiming to be read-only was believed, which is exactly the thing this
+ * function exists to refuse.
  */
-const DESTRUCTIVE_PREFIXES = ["delete_", "remove_", "destroy_", "purge_", "drop_", "truncate_", "revoke_", "wipe_"];
-const WRITE_PREFIXES = [
-  "create_",
-  "update_",
-  "insert_",
-  "add_",
-  "set_",
-  "put_",
-  "patch_",
-  "post_",
-  "write_",
-  "send_",
-  "publish_",
-  "upload_",
-  "move_",
-  "rename_",
-  "assign_",
-  "approve_",
-  "cancel_",
-  "execute_",
-  "run_",
-  "invoke_"
+const DESTRUCTIVE_VERBS = ["delete", "remove", "destroy", "purge", "drop", "truncate", "revoke", "wipe"];
+const WRITE_VERBS = [
+  "create",
+  "update",
+  "insert",
+  "add",
+  "set",
+  "put",
+  "patch",
+  "post",
+  "write",
+  "send",
+  "publish",
+  "upload",
+  "move",
+  "rename",
+  "assign",
+  "approve",
+  "cancel",
+  "execute",
+  "run",
+  "invoke",
+  "trigger",
+  "toggle",
+  "enable",
+  "disable",
+  "start",
+  "stop",
+  "reset"
 ];
-const READ_PREFIXES = ["get_", "list_", "read_", "fetch_", "search_", "find_", "query_", "describe_", "show_", "count_"];
+const READ_VERBS = [
+  "get",
+  "list",
+  "read",
+  "fetch",
+  "search",
+  "find",
+  "query",
+  "describe",
+  "show",
+  "count",
+  "echo",
+  "preview"
+];
 
 export interface Classification {
   readonly effect: Effect | undefined;
@@ -75,9 +104,36 @@ export function classify(tool: UpstreamTool, localName: string, policy: Policy):
 }
 
 function classifyByName(name: string): Effect | undefined {
-  const lower = name.toLowerCase();
-  if (DESTRUCTIVE_PREFIXES.some((p) => lower.startsWith(p))) return "destructive";
-  if (WRITE_PREFIXES.some((p) => lower.startsWith(p))) return "write";
-  if (READ_PREFIXES.some((p) => lower.startsWith(p))) return "read";
+  const first = firstWord(name);
+  if (first === undefined) return undefined;
+  if (DESTRUCTIVE_VERBS.includes(first)) return "destructive";
+  if (WRITE_VERBS.includes(first)) return "write";
+  if (READ_VERBS.includes(first)) return "read";
   return undefined;
+}
+
+/**
+ * The first word of a tool name, under any of the conventions upstreams use.
+ *
+ * Separators and camelCase boundaries both become word breaks, so
+ * `delete_note`, `delete-note`, `deleteNote` and `Delete.Note` all yield
+ * `delete`.
+ *
+ * A `<server>__` namespace is dropped first. It is the gateway's own prefix,
+ * not part of what the upstream called the tool, and reading a verb out of it
+ * would let an upstream *named* `delete` turn every one of its reads
+ * destructive.
+ */
+function firstWord(name: string): string | undefined {
+  const local = name.includes("__") ? name.slice(name.lastIndexOf("__") + 2) : name;
+  const spaced = local
+    .replace(/[-._:\s]+/g, " ")
+    // lower→upper and acronym→word boundaries, so `deleteNote` and `HTTPGet`
+    // both split where a reader would split them.
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
+    .trim()
+    .toLowerCase();
+  const first = spaced.split(" ").find((w) => w.length > 0);
+  return first;
 }
