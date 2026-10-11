@@ -43,6 +43,8 @@ export const UpstreamSchema = z.discriminatedUnion("transport", [
         .min(1)
         .regex(/^[a-z0-9_]+$/, "an upstream name must be lowercase letters, digits and underscores"),
       transport: z.literal("stdio"),
+      /** Overrides the gateway-wide `on_injection` for this upstream alone. */
+      on_injection: z.enum(["strip", "deny", "annotate"]).optional(),
       command: z.string().min(1),
       args: z.array(z.string()).default([]),
       /** Environment for the child process. Nothing else is inherited. */
@@ -59,6 +61,8 @@ export const UpstreamSchema = z.discriminatedUnion("transport", [
         .min(1)
         .regex(/^[a-z0-9_]+$/, "an upstream name must be lowercase letters, digits and underscores"),
       transport: z.literal("http"),
+      /** Overrides the gateway-wide `on_injection` for this upstream alone. */
+      on_injection: z.enum(["strip", "deny", "annotate"]).optional(),
       url: z.string().url(),
       /*
        * Static headers, sent on every request to this upstream. Note there is
@@ -93,8 +97,27 @@ export const GatewayConfigSchema = z
      * What to do with a tool whose description contains an injection attempt.
      * `strip` replaces the description and keeps the tool usable; `deny` hides
      * the tool; `annotate` leaves the text but prefixes a warning.
+     *
+     * The default for every upstream, overridable per upstream and then per
+     * tool. One setting for a whole gateway made a false positive expensive:
+     * `strip` replaces a description wholesale, so a legitimate tool caught by
+     * a fuzzy pattern loses the text the model needs and gets misused rather
+     * than failing — and the only escape was to weaken the setting everywhere.
      */
     on_injection: z.enum(["strip", "deny", "annotate"]).default("strip"),
+    /**
+     * Per-tool overrides, keyed by the name the gateway exposes — so
+     * `<server>__<tool>` when `namespace` is on.
+     *
+     * For the reviewed false positive. Written in the config and read in a
+     * diff, which is the point: a decision to treat a specific finding on a
+     * specific tool as noise should be as visible as any other policy edit.
+     *
+     * Note what is *not* here: an option to leave the text untouched. The
+     * weakest of the three still prefixes a warning, so an override can
+     * restore a description but never hide that it tripped a pattern.
+     */
+    injection_overrides: z.record(z.string(), z.enum(["strip", "deny", "annotate"])).default({}),
     /** Prefix upstream tool names with `<server>__`. */
     namespace: z.boolean().default(true)
   })

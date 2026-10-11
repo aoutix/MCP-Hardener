@@ -337,8 +337,16 @@ describe("the console's exposure switch, over a gateway", () => {
       const result = await h.client.callTool({ name: "notes__get_note", arguments: { id: "n1" } });
 
       expect((result as { isError?: boolean }).isError).toBe(true);
-      expect(textOf(result)).toContain("incident 412");
+      expect(textOf(result)).toMatch(/switched off by an operator/);
+      // The operator's name and reason stay in the record, not in the model's
+      // context. The log below is where they belong.
+      expect(textOf(result)).not.toContain("incident 412");
+      expect(textOf(result)).not.toContain("reviewer");
       expect(await upstreamCalls(h)).toHaveLength(before);
+
+      const record = readAuditLog(join(dir, "audit.jsonl")).find((r) => r.rule_id === "exposure.disabled");
+      expect(record!.reason).toContain("incident 412");
+      expect(record!.reason).toContain("reviewer");
     } finally {
       await h.close();
     }

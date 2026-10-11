@@ -165,11 +165,19 @@ describe("the switch, end to end", () => {
     expect(flip.status).toBe(200);
     expect(JSON.parse(flip.body).changed).toBe(true);
 
-    // Acme's agent can no longer see it, and a call is refused with the reason.
+    // Acme's agent can no longer see it, and a call is refused.
     expect((await acme.listTools()).tools.map((t) => t.name)).not.toContain("notes__get_note");
     const refused = await acme.callTool({ name: "notes__get_note", arguments: { id: "n1" } });
     expect((refused as { isError?: boolean }).isError).toBe(true);
-    expect((refused as { content: { text?: string }[] }).content.map((c) => c.text).join("")).toContain("incident 412");
+    const text = (refused as { content: { text?: string }[] }).content.map((c) => c.text).join("");
+    expect(text).toMatch(/switched off by an operator/);
+    /*
+     * And it is told nothing else. The operator's name and the free text they
+     * typed are the record, not a message for a model: the reason may carry the
+     * circumstances of an incident, and a model influenced by injected text
+     * elsewhere could carry it out through a tool that is still allowed.
+     */
+    expect(text).not.toContain("incident 412");
 
     // Globex is untouched.
     expect((await globex.listTools()).tools.map((t) => t.name)).toContain("notes__get_note");

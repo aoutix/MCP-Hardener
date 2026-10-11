@@ -103,7 +103,9 @@ export async function enforceCall<T>(options: EnforceOptions, call: EnforceCall<
     return {
       kind: "refused",
       decision,
-      message: `Refused by policy (${decision.ruleId}): ${decision.reason}`
+      // `agentReason` where the decision drew a line between what the record
+      // should say and what the caller should be told; `reason` otherwise.
+      message: `Refused by policy (${decision.ruleId}): ${decision.agentReason ?? decision.reason}`
     };
   }
 

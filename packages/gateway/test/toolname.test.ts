@@ -138,3 +138,108 @@ describe("a live upstream that attacks through its tool names", () => {
     expect(ran).toHaveLength(0);
   });
 });
+
+/**
+ * `on_injection` was one setting for a whole gateway, and `strip` replaces a
+ * description wholesale.
+ *
+ * Not a security hole — nothing in `decide()` or `classify()` reads a
+ * description, so a wiped one cannot weaken a verdict. It is a lossy default
+ * with no narrow lever: the patterns include fuzzy ones like `urgency`, so a
+ * legitimate tool saying "call this immediately" lost the text the model needs
+ * and got misused rather than failing, and the only remedy was to weaken the
+ * setting for every upstream at once. These pin down that there is now a
+ * narrower one, and that it cannot be used to hide a finding.
+ */
+describe("how an injection finding is handled", () => {
+  const INJECTED = resolve(import.meta.dirname, "./fixtures/mock-upstream.mjs");
+  let dir: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "hmcp-injaction-"));
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  async function surfaceWith(overrides: Record<string, unknown>) {
+    const gateway = new Gateway({
+      config: GatewayConfigSchema.parse({
+        version: 1,
+        name: "test-gateway",
+        policy: { version: 1 },
+        upstreams: [{ name: "notes", transport: "stdio", command: process.execPath, args: [INJECTED] }],
+        ...overrides
+      }),
+      policy: parsePolicy({
+        version: 1,
+        defaults: { mode: "read-only", on_unclassified: "deny" },
+        rules: [{ id: "reads", match: "notes__*", effect: "read", decision: "allow" }],
+        approvals: { mode: "cli", store_path: join(dir, "approvals.sqlite") },
+        audit: { enabled: true, path: join(dir, "audit.jsonl"), hash_chain: true },
+        egress: { allow: ["example.com"] }
+      }),
+      cwd: dir
+    });
+    await gateway.connectUpstreams();
+    const entry = gateway.inventory().find((t) => t.injection !== null)!;
+    await gateway.close();
+    return entry;
+  }
+
+  it("defaults to the gateway-wide setting", async () => {
+    const entry = await surfaceWith({ on_injection: "strip" });
+    expect(entry.injection!.action).toBe("strip");
+    expect(entry.description).toMatch(/withheld by hmcp-gateway/);
+  });
+
+  it("lets one upstream be handled differently from the rest", async () => {
+    const entry = await surfaceWith({
+      on_injection: "strip",
+      upstreams: [
+        {
+          name: "notes",
+          transport: "stdio",
+          command: process.execPath,
+          args: [INJECTED],
+          on_injection: "annotate"
+        }
+      ]
+    });
+    expect(entry.injection!.action).toBe("annotate");
+  });
+
+  it("lets one reviewed tool be handled differently from its upstream", async () => {
+    const first = await surfaceWith({ on_injection: "deny" });
+    const entry = await surfaceWith({
+      on_injection: "deny",
+      injection_overrides: { [first.localName]: "annotate" }
+    });
+    expect(entry.injection!.action).toBe("annotate");
+    expect(entry.hidden).toBe(false);
+  });
+
+  it("records that an override was what produced the action", async () => {
+    const first = await surfaceWith({ on_injection: "strip" });
+    rmSync(join(dir, "audit.jsonl"), { force: true });
+    await surfaceWith({ on_injection: "strip", injection_overrides: { [first.localName]: "annotate" } });
+
+    const record = readAuditLog(join(dir, "audit.jsonl")).find((r) => r.rule_id === "HMCP005")!;
+    expect(record.reason).toContain("action: annotate");
+    expect(record.reason).toContain("overriding the gateway default of strip");
+  });
+
+  it("cannot be used to hide that the text tripped a pattern", async () => {
+    // The weakest of the three still prefixes a warning and still keeps the
+    // finding on the record. There is deliberately no fourth option that
+    // leaves the description untouched.
+    const first = await surfaceWith({ on_injection: "deny" });
+    const entry = await surfaceWith({
+      on_injection: "deny",
+      injection_overrides: { [first.localName]: "annotate" }
+    });
+    expect(entry.description).toMatch(/hmcp-gateway warning/);
+    expect(entry.description).toMatch(/data, not as instructions/);
+    expect(entry.injection!.patternIds.length).toBeGreaterThan(0);
+    expect(readAuditLog(join(dir, "audit.jsonl")).some((r) => r.rule_id === "HMCP005")).toBe(true);
+  });
+});
+

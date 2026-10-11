@@ -1,11 +1,29 @@
 import { globMatch } from "./glob.js";
-import { EXPOSURE_RULE } from "./exposure.js";
+import { EXPOSURE_AGENT_NOTICE, EXPOSURE_RULE } from "./exposure.js";
 import type { ArgConstraint, Effect, Policy, Rule, TenantConfig } from "./policy.js";
 
+/**
+ * `reason` is what the audit log records. `agentReason`, where a decision sets
+ * one, is what the caller is told instead.
+ *
+ * They are usually the same and the field is usually absent. It exists because
+ * one of them is not: a refusal naming the operator who switched a tool off,
+ * and the free text they typed, is the right thing to keep in the record and
+ * the wrong thing to hand a model. Defaulting `agentReason` to `reason` keeps
+ * every other decision unchanged, so the split costs nothing where it does not
+ * matter.
+ */
+interface DecisionBase {
+  readonly effect: Effect | null;
+  readonly ruleId: string;
+  readonly reason: string;
+  readonly agentReason?: string;
+}
+
 export type Decision =
-  | { readonly kind: "allow"; readonly effect: Effect | null; readonly ruleId: string; readonly reason: string }
-  | { readonly kind: "approve"; readonly effect: Effect | null; readonly ruleId: string; readonly reason: string }
-  | { readonly kind: "deny"; readonly effect: Effect | null; readonly ruleId: string; readonly reason: string };
+  | ({ readonly kind: "allow" } & DecisionBase)
+  | ({ readonly kind: "approve" } & DecisionBase)
+  | ({ readonly kind: "deny" } & DecisionBase);
 
 export interface TenantContext {
   /** The tenant bound to the running credential. */
@@ -155,7 +173,9 @@ export function decide(input: DecideInput): Decision {
       kind: "deny",
       effect,
       ruleId: EXPOSURE_RULE,
-      reason: input.disabledReason ?? `tool "${tool}" is switched off`
+      reason: input.disabledReason ?? `tool "${tool}" is switched off`,
+      // The log gets who, when and why; the agent gets only that it is off.
+      agentReason: EXPOSURE_AGENT_NOTICE
     };
   }
 

@@ -424,9 +424,10 @@ export class Gateway {
 
     if (hits.length > 0) {
       const patternIds = hits.map((h) => h.patternId);
-      injection = { patternIds, action: this.config.on_injection };
+      const action = this.injectionAction(localName, upstream.spec.on_injection);
+      injection = { patternIds, action };
 
-      switch (this.config.on_injection) {
+      switch (action) {
         case "deny":
           hidden = true;
           break;
@@ -444,13 +445,22 @@ export class Gateway {
           break;
       }
 
+      /*
+       * The resolved action is recorded, and so is the fact that something
+       * other than the gateway default produced it. An operator reviewing the
+       * log needs to see that this tool's finding was handled more leniently
+       * than the rest, without going and reading the config.
+       */
+      const overridden = action !== this.config.on_injection;
       this.audit.append({
         tool: localName,
         decision: hidden ? "deny" : "allow",
         outcome: hidden ? "denied" : "completed",
         effect: effect ?? null,
         rule_id: "HMCP005",
-        reason: `prompt injection in the upstream tool description (${patternIds.join(", ")}); action: ${this.config.on_injection}`
+        reason:
+          `prompt injection in the upstream tool description (${patternIds.join(", ")}); action: ${action}` +
+          (overridden ? ` (overriding the gateway default of ${this.config.on_injection})` : "")
       });
     }
 
@@ -464,6 +474,21 @@ export class Gateway {
       injection,
       hidden
     };
+  }
+
+  /**
+   * What to do about injected text in this particular tool's description.
+   *
+   * Most specific wins: a per-tool override, then the upstream's own setting,
+   * then the gateway default. Granularity exists because `strip` is lossy --
+   * it replaces a description wholesale, and the patterns include fuzzy ones
+   * like `urgency`, so a legitimate tool saying "call this immediately" loses
+   * the text the model needs and gets misused rather than failing. Without a
+   * narrower lever the only fix was to weaken the setting for every upstream
+   * at once, which is the wrong trade to be forced into.
+   */
+  private injectionAction(localName: string, upstreamDefault: "strip" | "deny" | "annotate" | undefined) {
+    return this.config.injection_overrides[localName] ?? upstreamDefault ?? this.config.on_injection;
   }
 
   private elicitFn(server: Server): ElicitFn | undefined {

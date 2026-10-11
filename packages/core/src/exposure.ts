@@ -82,7 +82,30 @@ export function parseExposureChange(raw: unknown): ExposureChange {
   return ExposureChangeSchema.parse(raw);
 }
 
-/** The reason text a refusal carries when a tool is switched off. */
+/**
+ * What the *agent* is told when it calls a switched-off tool.
+ *
+ * Deliberately not `exposureDeniedReason`. That names the operator and repeats
+ * the free-text reason they typed, which belongs in the audit log and the
+ * console and not in a model's context: the reason may carry the circumstances
+ * of an incident, and a model that has been influenced by injected text
+ * elsewhere could carry it out through a tool that is still allowed. The
+ * upstream never sees either string -- the refusal short-circuits before the
+ * call is made -- so the only reader of this is the operator's own agent.
+ *
+ * It still says enough to be useful: that the tool is off deliberately rather
+ * than broken, so the agent reports it instead of retrying.
+ */
+export const EXPOSURE_AGENT_NOTICE =
+  "this tool has been switched off by an operator of this gateway. It is not a transient failure, " +
+  "and policy was not changed; retrying will not help. Ask whoever runs the gateway if you need it.";
+
+/**
+ * The full reason, for the audit log and the console.
+ *
+ * Names who switched it off, when, and why, because that is the record an
+ * operator needs later. Not shown to the agent -- see `EXPOSURE_AGENT_NOTICE`.
+ */
 export function exposureDeniedReason(row: ToolExposureRow): string {
   const when = new Date(row.set_at).toISOString();
   return (

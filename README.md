@@ -403,10 +403,18 @@ npm test
   upstream's annotations, and nothing reads the description, so injected text cannot change a
   verdict however novel its phrasing. It is advertised to the model, scanned, and displayed —
   that is all.
-- `on_injection` is one setting for the whole gateway, and `strip` replaces a description
-  wholesale. A false positive therefore costs the model the information it needs to use that tool
-  correctly, and it will misuse it rather than fail. There is no per-tool override yet, so
-  `annotate` is the safer default on a surface you have not reviewed.
+- `strip` replaces a description wholesale, so a false positive costs the model the information it
+  needs and it will misuse the tool rather than fail. That is a lossy default rather than an
+  unsafe one — nothing in `decide()` reads a description — and it is narrowable: `on_injection` can
+  be set per upstream, and `injection_overrides` per tool for a reviewed false positive. The
+  weakest of the three still prefixes a warning, so an override can restore a description but
+  never hide that it tripped a pattern, and the audit record says when an override produced the
+  action.
+- A refusal tells the agent only that a tool was switched off, not who switched it off or the
+  reason they typed. Those stay in the audit log and the console. The agent is the operator's own,
+  and the upstream never sees either string, but a reason can carry the circumstances of an
+  incident and a model influenced by injected text elsewhere could carry it out through a tool
+  that is still allowed.
 - Untrusted text is escaped where it is printed, not where it is stored. JSON escapes control
   characters on the way into the audit log, so the file is safe to `cat`; it is parsing a record
   back and printing it that would otherwise let an upstream rewrite a terminal, so every line the
