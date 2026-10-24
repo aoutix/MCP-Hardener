@@ -1,6 +1,23 @@
 {
   "name": "@hmcp/core",
   "version": "0.1.0",
+  "description": "Policy schema, decision engine, approvals, standing grants, egress guard and hash-chained audit log for hardened-mcp.",
+  "license": "MIT",
+  "author": "Aditya Das",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aoutix/MCP-Hardener.git",
+    "directory": "packages/core"
+  },
+  "homepage": "https://github.com/aoutix/MCP-Hardener#readme",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "security",
+    "policy",
+    "gateway",
+    "audit"
+  ],
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -8,8 +25,16 @@
     ".": "./dist/index.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "README.md",
+    "LICENSE"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  },
   "dependencies": {
     "yaml": "^2.7.0",
     "zod": "^4.0.0",

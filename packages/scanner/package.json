@@ -1,10 +1,41 @@
 {
   "name": "@hmcp/scanner",
   "version": "0.1.0",
+  "description": "The ten hardened-mcp scanner rules, with SARIF and markdown reporters.",
+  "license": "MIT",
+  "author": "Aditya Das",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aoutix/MCP-Hardener.git",
+    "directory": "packages/scanner"
+  },
+  "homepage": "https://github.com/aoutix/MCP-Hardener#readme",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "security",
+    "policy",
+    "gateway",
+    "audit"
+  ],
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "exports": { ".": "./dist/index.js" },
-  "files": ["dist"],
-  "dependencies": { "@hmcp/core": "0.1.0" }
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "dependencies": {
+    "@hmcp/core": "0.1.0"
+  }
 }

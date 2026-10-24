@@ -1,18 +1,43 @@
 {
   "name": "hmcp-gateway",
   "version": "0.1.0",
+  "description": "A policy gateway that sits between an agent and the MCP servers it uses, enforcing what each tool may do.",
+  "license": "MIT",
+  "author": "Aditya Das",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aoutix/MCP-Hardener.git",
+    "directory": "packages/gateway"
+  },
+  "homepage": "https://github.com/aoutix/MCP-Hardener#readme",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "security",
+    "policy",
+    "gateway",
+    "audit"
+  ],
   "type": "module",
+  "bin": {
+    "hmcp-gateway": "./dist/cli.js"
+  },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
     ".": "./dist/index.js"
   },
-  "bin": {
-    "hmcp-gateway": "./dist/cli.js"
-  },
   "files": [
-    "dist"
+    "dist",
+    "README.md",
+    "LICENSE"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  },
   "dependencies": {
     "@hmcp/core": "0.1.0",
     "@hmcp/scanner": "0.1.0",

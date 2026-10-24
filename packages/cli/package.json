@@ -1,10 +1,39 @@
 {
   "name": "hmcp",
   "version": "0.1.0",
+  "description": "Command line for hardened-mcp: approvals, audit verification and policy inspection.",
+  "license": "MIT",
+  "author": "Aditya Das",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aoutix/MCP-Hardener.git",
+    "directory": "packages/cli"
+  },
+  "homepage": "https://github.com/aoutix/MCP-Hardener#readme",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "security",
+    "policy",
+    "gateway",
+    "audit"
+  ],
   "type": "module",
+  "bin": {
+    "hmcp": "./dist/cli.js"
+  },
   "main": "./dist/index.js",
-  "bin": { "hmcp": "./dist/cli.js" },
-  "files": ["dist"],
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  },
   "dependencies": {
     "@hmcp/core": "0.1.0",
     "@hmcp/scanner": "0.1.0",

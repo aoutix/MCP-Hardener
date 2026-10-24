@@ -1,19 +1,44 @@
 {
   "name": "@hmcp/web",
   "version": "0.1.0",
+  "description": "The hardened-mcp review console: what each gateway exposes, and why.",
+  "license": "MIT",
+  "author": "Aditya Das",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aoutix/MCP-Hardener.git",
+    "directory": "packages/web"
+  },
+  "homepage": "https://github.com/aoutix/MCP-Hardener#readme",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "security",
+    "policy",
+    "gateway",
+    "audit"
+  ],
   "type": "module",
+  "bin": {
+    "hmcp-web": "./dist/cli.js"
+  },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
     ".": "./dist/index.js"
   },
-  "bin": {
-    "hmcp-web": "./dist/cli.js"
-  },
   "files": [
     "dist",
-    "dist-ui"
+    "dist-ui",
+    "README.md",
+    "LICENSE"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  },
   "scripts": {
     "build:ui": "vite build ui --config ui/vite.config.ts",
     "typecheck:ui": "tsc -p ui/tsconfig.json",
