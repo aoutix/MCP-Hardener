@@ -855,6 +855,79 @@ function RedactedValue({ value }: { value: unknown }) {
   );
 }
 
+/**
+ * Pretty-printed JSON, for a document whose structure is the point.
+ *
+ * `RedactedArgs` renders one call's arguments, where the keys are shallow and
+ * the values are what a reviewer reads. A JSON Schema is the other shape: the
+ * nesting carries the meaning, and flattening it into key/value rows loses
+ * which object a constraint sits in. So this prints the document as written.
+ *
+ * Nothing here is semantic colour. The verdict palette means allowed, held and
+ * refused everywhere else in this console, and a string in a schema is not
+ * "allowed" — the tokens are told apart by weight alone.
+ */
+export function JsonBlock({ value, maxHeight = "22rem" }: { value: unknown; maxHeight?: string }) {
+  let text: string;
+  try {
+    text = JSON.stringify(value, null, 2) ?? String(value);
+  } catch {
+    // Upstream JSON that arrived over the wire cannot hold a cycle, but it is
+    // third-party input and this view is not worth crashing the panel over.
+    return <p className="text-xs text-medium">This schema could not be displayed.</p>;
+  }
+  return (
+    <pre
+      className="mono overflow-auto rounded-lg border border-edge bg-raise px-3 py-2.5 text-xs leading-relaxed whitespace-pre-wrap [overflow-wrap:anywhere]"
+      style={{ maxHeight }}
+    >
+      <code>{tokenizeJson(text)}</code>
+    </pre>
+  );
+}
+
+/**
+ * Splits already-stringified JSON into keys, strings, literals and punctuation.
+ *
+ * It runs over `JSON.stringify` output rather than arbitrary text, so the
+ * grammar is known and the escapes are already normalised. React builds the
+ * spans, so nothing upstream wrote is ever interpreted as markup.
+ */
+function tokenizeJson(text: string): React.ReactNode[] {
+  const pattern = /("(?:\\.|[^"\\])*")(\s*:)?|\b(?:true|false|null)\b|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g;
+  const out: React.ReactNode[] = [];
+  let last = 0;
+  let match: RegExpExecArray | null;
+  let key = 0;
+  while ((match = pattern.exec(text)) !== null) {
+    if (match.index > last) out.push(text.slice(last, match.index));
+    const [whole, quoted, colon] = match;
+    if (quoted && colon) {
+      out.push(
+        <span key={key++} className="font-semibold text-ink">
+          {quoted}
+        </span>,
+        colon
+      );
+    } else if (quoted) {
+      out.push(
+        <span key={key++} className="text-ink-soft">
+          {quoted}
+        </span>
+      );
+    } else {
+      out.push(
+        <span key={key++} className="text-ink-soft italic">
+          {whole}
+        </span>
+      );
+    }
+    last = match.index + whole.length;
+  }
+  if (last < text.length) out.push(text.slice(last));
+  return out;
+}
+
 export function RedactedArgs({ args, error }: { args: unknown; error?: string | null }) {
   if (error) return <p className="text-xs text-medium">{error}</p>;
   if (args === null || args === undefined) return <p className="text-xs text-ink-soft">no arguments recorded</p>;

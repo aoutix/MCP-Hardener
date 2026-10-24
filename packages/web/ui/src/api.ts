@@ -98,6 +98,14 @@ export interface ToolProtection {
     required: boolean;
     description?: string;
     constrainedByRule: string | null;
+    /** The values the upstream said it accepts, or null where it named none. */
+    enumValues: string[] | null;
+    /** `format`, verbatim. `uri` is the one that says this argument is dialled. */
+    format?: string;
+    /** What the upstream substitutes when the model supplies nothing. */
+    defaultValue: string | null;
+    /** That default is an absolute http(s) URL — a destination `policy.egress` does not bound. */
+    defaultIsUrl: boolean;
   }[];
   /** `true` closed, `false` explicitly open, `null` the upstream did not say. */
   schemaClosed: boolean | null;

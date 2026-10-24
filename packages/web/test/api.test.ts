@@ -384,6 +384,66 @@ describe("the function list", () => {
     expect(probe.schemaClosed).toBe(expected);
     publishSurface(fixture, SURFACE);
   });
+
+  /*
+   * The parts of a property the console used to drop. `enum` and `default`
+   * are what the model is actually working from, and an argument the console
+   * renders as a bare `string` when the upstream bounded it to two values
+   * overstates the freedom the model has.
+   */
+  it("carries the enum, format and default an upstream declared", async () => {
+    publishSurface(fixture, [
+      tool("probe_props", {
+        inputSchema: {
+          type: "object",
+          properties: {
+            outputType: { type: "string", enum: ["resourceLink", "resource"], default: "resourceLink" },
+            data: { type: "string", format: "uri" },
+            retries: { type: "integer", default: 3 }
+          }
+        }
+      })
+    ]);
+    const probe = await (await api("/api/v1/servers/billing/tools/probe_props")).json();
+    const arg = (name: string) => probe.args.find((a: { name: string }) => a.name === name);
+
+    expect(arg("outputType").enumValues).toEqual(["resourceLink", "resource"]);
+    expect(arg("outputType").defaultValue).toBe("resourceLink");
+    expect(arg("data").format).toBe("uri");
+    expect(arg("data").enumValues).toBeNull();
+    // Serialised for display, so a non-string default still survives the trip.
+    expect(arg("retries").defaultValue).toBe("3");
+    publishSurface(fixture, SURFACE);
+  });
+
+  /*
+   * A default URL is a destination the upstream picked and the model can
+   * reach without naming it. `policy.egress` does not bound it, so the
+   * console has to point at it rather than leave it in the raw schema.
+   */
+  it.each([
+    ["an https default", "https://raw.githubusercontent.com/o/r/main/README.md", true],
+    ["an http default", "http://example.com/x", true],
+    ["a data URI", "data:text/plain,hello", false],
+    ["a plain string", "README.md.gz", false]
+  ])("flags %s as a network destination or not", async (_label, value, expected) => {
+    publishSurface(fixture, [
+      tool("probe_default", { inputSchema: { type: "object", properties: { data: { type: "string", default: value } } } })
+    ]);
+    const probe = await (await api("/api/v1/servers/billing/tools/probe_default")).json();
+    expect(probe.args[0].defaultValue).toBe(value);
+    expect(probe.args[0].defaultIsUrl).toBe(expected);
+    publishSurface(fixture, SURFACE);
+  });
+
+  it("reports no enum or default where the upstream declared none", async () => {
+    const tool = await (await api("/api/v1/servers/billing/tools/create_invoice")).json();
+    const amount = tool.args.find((a: { name: string }) => a.name === "amount");
+    expect(amount.enumValues).toBeNull();
+    expect(amount.defaultValue).toBeNull();
+    expect(amount.defaultIsUrl).toBe(false);
+    expect(amount.format).toBeUndefined();
+  });
 });
 
 describe("a shared approvals database", () => {

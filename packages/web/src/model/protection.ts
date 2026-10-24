@@ -80,6 +80,26 @@ export interface ToolProtection {
     readonly required: boolean;
     readonly description: string | undefined;
     readonly constrainedByRule: string | null;
+    /** The values the upstream said it accepts, or null where it named none. */
+    readonly enumValues: readonly string[] | null;
+    /** `format`, verbatim. `uri` is the one that says this argument is dialled. */
+    readonly format: string | undefined;
+    /**
+     * The value the upstream fills in when the model supplies none, rendered
+     * for display. Carried because an argument with a default is an argument
+     * the model can leave out and still cause something to happen.
+     */
+    readonly defaultValue: string | null;
+    /**
+     * Whether that default is an absolute `http(s)` URL.
+     *
+     * Worth its own field rather than left for the reader to spot. A default
+     * URL is a network destination chosen by the upstream, reachable by a
+     * call that names no arguments at all, and `policy.egress` does not bound
+     * it: the egress guard governs what *this* gateway dials, so a stdio
+     * upstream fetching it is outside the allowlist entirely.
+     */
+    readonly defaultIsUrl: boolean;
   }[];
   /**
    * Whether the upstream declared its argument object closed.
@@ -342,7 +362,11 @@ export function toolProtection(
       type: node.type,
       required: required.has(name),
       description: node.description,
-      constrainedByRule: matchedRule?.args?.[name] ? matchedRule.id : null
+      constrainedByRule: matchedRule?.args?.[name] ? matchedRule.id : null,
+      enumValues: node.enumValues ?? null,
+      format: node.format,
+      defaultValue: node.defaultValue ?? null,
+      defaultIsUrl: isHttpUrl(node.defaultValue)
     })),
     schemaClosed:
       schema.additionalProperties === false ? true : schema.additionalProperties === true ? false : null,
@@ -370,19 +394,36 @@ export function toolProtection(
  * the view needs without asserting a type it has not checked.
  */
 function asObjectSchema(raw: unknown): {
-  properties: Record<string, { type?: string; description?: string }>;
+  properties: Record<
+    string,
+    {
+      type?: string;
+      description?: string;
+      format?: string;
+      enumValues?: string[];
+      defaultValue?: string;
+    }
+  >;
   required: string[];
   additionalProperties: unknown;
 } {
   const schema = (typeof raw === "object" && raw !== null ? raw : {}) as Record<string, unknown>;
   const rawProps = schema["properties"];
-  const properties: Record<string, { type?: string; description?: string }> = {};
+  const properties: Record<
+    string,
+    { type?: string; description?: string; format?: string; enumValues?: string[]; defaultValue?: string }
+  > = {};
   if (typeof rawProps === "object" && rawProps !== null) {
     for (const [name, node] of Object.entries(rawProps as Record<string, unknown>)) {
       const n = (typeof node === "object" && node !== null ? node : {}) as Record<string, unknown>;
+      const enumValues = asEnumValues(n["enum"]);
+      const defaultValue = asScalarText(n["default"]);
       properties[name] = {
         ...(typeof n["type"] === "string" ? { type: n["type"] } : {}),
-        ...(typeof n["description"] === "string" ? { description: n["description"] } : {})
+        ...(typeof n["description"] === "string" ? { description: n["description"] } : {}),
+        ...(typeof n["format"] === "string" ? { format: n["format"] } : {}),
+        ...(enumValues ? { enumValues } : {}),
+        ...(defaultValue !== undefined ? { defaultValue } : {})
       };
     }
   }
@@ -392,6 +433,52 @@ function asObjectSchema(raw: unknown): {
     required: Array.isArray(rawRequired) ? rawRequired.filter((r): r is string => typeof r === "string") : [],
     additionalProperties: schema["additionalProperties"]
   };
+}
+
+/**
+ * An `enum` reduced to display strings, or undefined where there is nothing
+ * to show. JSON Schema permits any value in an `enum`, so a non-scalar member
+ * is rendered as its JSON rather than dropped: an argument bounded to one of
+ * three objects is still bounded, and hiding that would overstate the freedom
+ * the model has.
+ */
+function asEnumValues(raw: unknown): string[] | undefined {
+  if (!Array.isArray(raw) || raw.length === 0) return undefined;
+  const values = raw.map((v) => asScalarText(v) ?? safeJson(v)).filter((v): v is string => v !== undefined);
+  return values.length > 0 ? values : undefined;
+}
+
+/** A JSON scalar as text. Objects and arrays are not this function's business. */
+function asScalarText(raw: unknown): string | undefined {
+  if (typeof raw === "string") return raw;
+  if (typeof raw === "number" || typeof raw === "boolean") return String(raw);
+  if (raw === null) return "null";
+  return undefined;
+}
+
+function safeJson(raw: unknown): string | undefined {
+  try {
+    return JSON.stringify(raw);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Whether a default is an absolute `http(s)` URL.
+ *
+ * Only those two schemes. A `data:` or `file:` default is a different problem
+ * and saying "this argument defaults to a URL" about one would send a reviewer
+ * looking for network traffic that is not there.
+ */
+function isHttpUrl(raw: string | undefined): boolean {
+  if (raw === undefined) return false;
+  try {
+    const protocol = new URL(raw).protocol;
+    return protocol === "http:" || protocol === "https:";
+  } catch {
+    return false;
+  }
 }
 
 function ruleRows(policy: Policy, toolNames: readonly string[]): ServerProtection["rules"] {

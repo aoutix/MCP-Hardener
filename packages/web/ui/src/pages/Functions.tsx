@@ -5,9 +5,9 @@ import {
   Button,
   Empty,
   Icon,
+  JsonBlock,
   Modal,
   Mono,
-  RedactedArgs,
   SeverityBadge,
   Tag,
   VerdictBadge,
@@ -1201,12 +1201,19 @@ function ConfigurationTab({
             </Row>
           )}
           <Row label="Tenant scoping">
-            {server?.tenant ? (
+            {/* An absent tenant block is a complete configuration, not a gap:
+             * a deployment serving one customer has no second tenant to scope
+             * away from. Saying "not configured" read as an unfinished setup. */}
+            {server === null ? (
+              "—"
+            ) : server.tenant ? (
               <span className="text-accent-strong">
                 {server.tenant.field} from {server.tenant.sourceKind}
               </span>
             ) : (
-              <span className="text-ink-soft">Not configured</span>
+              <span title="This gateway's policy declares no tenant block, so no tenant is bound to a call and none is injected upstream.">
+                Single-tenant
+              </span>
             )}
           </Row>
           <Row label="Advertised to the model">
@@ -1348,7 +1355,48 @@ function ConfigurationTab({
   );
 }
 
+/**
+ * What the upstream said bounds this argument, beyond its type.
+ *
+ * All of it comes from the advertised schema, so it is a claim rather than an
+ * enforcement — the gateway bounds an argument when a policy rule names it,
+ * which is the one line here that is not the upstream's own word.
+ */
+function ArgBounds({ arg }: { arg: ToolProtection["args"][number] }) {
+  const parts: React.ReactNode[] = [];
+  if (arg.constrainedByRule) parts.push(<Tag key="rule">bounded by {arg.constrainedByRule}</Tag>);
+  if (arg.enumValues) {
+    parts.push(
+      <span key="enum">
+        one of{" "}
+        {arg.enumValues.map((v, i) => (
+          <span key={v}>
+            {i > 0 && <span className="text-ink-faint">, </span>}
+            <Mono>{v}</Mono>
+          </span>
+        ))}
+      </span>
+    );
+  }
+  if (arg.defaultValue !== null) {
+    parts.push(
+      <span key="default" className={arg.defaultIsUrl ? "text-write" : undefined}>
+        defaults to <Mono>{arg.defaultValue}</Mono>
+      </span>
+    );
+  }
+  if (parts.length === 0) return <>—</>;
+  return (
+    <div className="space-y-0.5 [overflow-wrap:anywhere]">
+      {parts.map((part, i) => (
+        <div key={i}>{part}</div>
+      ))}
+    </div>
+  );
+}
+
 function SchemaTab({ tool }: { tool: ToolProtection }) {
+  const urlDefaults = tool.args.filter((a) => a.defaultIsUrl);
   return (
     <div className="space-y-5">
       <Section icon="braces" title="Arguments the model may supply">
@@ -1370,14 +1418,45 @@ function SchemaTab({ tool }: { tool: ToolProtection }) {
                     <span className="mono">{arg.name}</span>
                     {arg.required && <span className="ml-1 text-xs text-ink-faint">required</span>}
                   </td>
-                  <td className="py-1.5 pr-3 text-ink-soft">{arg.type ?? "—"}</td>
+                  <td className="py-1.5 pr-3 text-ink-soft">
+                    {arg.type ?? "—"}
+                    {arg.format && <span className="text-ink-faint"> · {arg.format}</span>}
+                  </td>
                   <td className="py-1.5">
-                    {arg.constrainedByRule ? <Tag>bounded by {arg.constrainedByRule}</Tag> : "—"}
+                    <ArgBounds arg={arg} />
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
+        )}
+        {/*
+         * Said once, under the table, rather than on each row. The point is
+         * not that a default exists — plenty do — but that this one is a
+         * destination, and that the egress panel on the Protection page does
+         * not cover it.
+         */}
+        {urlDefaults.length > 0 && (
+          <p className="mt-2 flex items-start gap-1.5 text-xs text-ink-soft">
+            <Icon name="alert" size={13} className="mt-0.5 shrink-0 text-write" />
+            <span>
+              {urlDefaults.length === 1 ? (
+                <>
+                  <Mono>{urlDefaults[0]!.name}</Mono> defaults to a URL
+                </>
+              ) : (
+                <>
+                  {urlDefaults.map((a) => (
+                    <Mono key={a.name}>{a.name}</Mono>
+                  ))}{" "}
+                  default to URLs
+                </>
+              )}
+              , so the model can cause this upstream to make a request without naming a destination.{" "}
+              <Mono>policy.egress</Mono> does not bound it — that allowlist governs what this gateway dials, not
+              what an upstream dials on its own.
+            </span>
+          </p>
         )}
       </Section>
 
@@ -1411,7 +1490,13 @@ function SchemaTab({ tool }: { tool: ToolProtection }) {
 
       {tool.inputSchema !== undefined && tool.inputSchema !== null && (
         <Section icon="braces" title="The schema the model receives">
-          <RedactedArgs args={tool.inputSchema} />
+          {/*
+           * Verbatim, and printed as the document it is. The table above is
+           * this console's reading of the schema; this is the schema, so a
+           * reviewer can see anything the table does not model — an `enum`, a
+           * nested object, a `$schema` the upstream chose to send.
+           */}
+          <JsonBlock value={tool.inputSchema} />
         </Section>
       )}
     </div>
