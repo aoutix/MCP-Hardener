@@ -8,8 +8,16 @@ import { loadGatewayConfig } from "./config.js";
 import { Gateway } from "./gateway.js";
 import { serveHttp } from "./serve-http.js";
 import { ExposureCommandError, runExposureCommand } from "./exposure-cli.js";
+import { AdoptCommandError, runAdoptCommand, runRevertCommand } from "./adopt-cli.js";
+import type { Scope } from "./client-config.js";
+import type { Posture } from "@hmcp/core";
 
 const program = new Command();
+
+/** Commander's accumulator for a repeatable option. */
+function collect(value: string, previous: string[]): string[] {
+  return [...previous, value];
+}
 
 program
   .name("hmcp-gateway")
@@ -207,6 +215,58 @@ exposure
   .action(exposureAction("on"));
 
 program
+  .command("adopt")
+  .description("Put this gateway in front of the MCP servers a client already has configured.")
+  .option("--apply", "write the files and edit the client config; without it, only report", false)
+  .option("--revert", "restore the servers this command replaced", false)
+  .option("--scope <scope>", "project | local | user; detected when there is only one")
+  .option("--name <pair>", "rename an upstream: <original>=<name>; repeatable", collect, [] as string[])
+  .option("--gateway-name <name>", "the gateway's name, which names it in the audit log", "claude-code")
+  .option("--entry-name <name>", "what to call the gateway in the client's config", "hmcp")
+  .option("--posture <mode>", "read-only | approve-writes | locked", "approve-writes")
+  .option("--copy-env", "resolve ${VAR} now and write literal values into gateway.yaml", false)
+  .option("--allow-local-http", "adopt HTTP upstreams on loopback, relaxing the SSRF guard", false)
+  .option("--strict-egress", "pin seeded egress entries to the upstream's port", false)
+  .option("--local", "point the client at this build on disk instead of a published version")
+  .option("--pin <version>", "the published version to pin in the client's config")
+  .option("--relative-config", "write a relative -c path, for a config meant to be shared", false)
+  .option("--out-dir <dir>", "where to write gateway.yaml and policy.yaml")
+  .option("--no-register", "do not add this gateway to the console's registry")
+  .option("--id <id>", "the registry id to use")
+  .option("--registry <file>", "the console's server registry")
+  .option("--purge", "with --revert, also delete the generated files", false)
+  .action(async (options) => {
+    await run(async () => {
+      const shared = {
+        scope: options.scope as Scope | undefined,
+        registry: options.registry as string | undefined,
+        write: log
+      };
+      if (options.revert) {
+        await runRevertCommand({ ...shared, purge: options.purge as boolean });
+        return;
+      }
+      await runAdoptCommand({
+        ...shared,
+        apply: options.apply as boolean,
+        name: options.gatewayName as string,
+        entryName: options.entryName as string,
+        posture: options.posture as Posture,
+        copyEnv: options.copyEnv as boolean,
+        allowLocalHttp: options.allowLocalHttp as boolean,
+        strictEgress: options.strictEgress as boolean,
+        names: options.name as string[],
+        local: options.local as boolean | undefined,
+        pinVersion: options.pin as string | undefined,
+        relativeConfig: options.relativeConfig as boolean,
+        outDir: options.outDir as string | undefined,
+        register: options.register as boolean,
+        id: options.id as string | undefined
+      });
+    });
+  });
+
+program
   .command("scan")
   .description("Scan every upstream server's advertised tool surface.")
   .option("-c, --config <file>", "gateway config", "gateway.yaml")
@@ -257,7 +317,7 @@ async function run(fn: () => Promise<void>): Promise<void> {
   try {
     await fn();
   } catch (err) {
-    if (err instanceof ExposureCommandError) {
+    if (err instanceof ExposureCommandError || err instanceof AdoptCommandError) {
       warn(`error: ${err.message}`);
       process.exit(1);
     }

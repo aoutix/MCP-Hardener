@@ -30,6 +30,12 @@ credentials.json
 *.sqlite-shm
 .hmcp/
 
+# `hmcp-gateway adopt` keeps the entries it replaced so `--revert` can put them
+# back. They are copied verbatim, so one that held a literal credential rather
+# than a `${VAR}` means these files hold it too.
+.hmcp-adopt-backup.json
+*.hmcp-backup
+
 # `npm run demo` state: a gateway config, a registry, an approvals database and
 # an audit log, all rebuilt from the examples on demand. Disposable by design —
 # the demo keeps it here precisely so it never writes into ~/.hmcp.

@@ -4,3 +4,6 @@ export * from "./upstream.js";
 export * from "./gateway.js";
 export * from "./credential.js";
 export * from "./serve-http.js";
+export * from "./client-config.js";
+export * from "./adopt-plan.js";
+export * from "./adopt-emit.js";

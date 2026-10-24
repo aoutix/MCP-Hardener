@@ -46,6 +46,45 @@ npm test
 Node 22.5 or newer, which is where the built-in `node:sqlite` the approval store uses became
 available. There is no native dependency to compile.
 
+## Putting it in front of the servers you already have
+
+```bash
+npx hmcp-gateway adopt              # report what wrapping them would do
+npx hmcp-gateway adopt --apply      # write the config and swap the client over
+npx hmcp-gateway adopt --revert     # put the original entries back
+```
+
+`adopt` reads the MCP servers your client has configured — a project `.mcp.json`, or the per-project
+or user-wide block in `~/.claude.json` — and does the four things that otherwise have to be done by
+hand: writes `gateway.yaml` with an upstream per server, writes a `policy.yaml`, replaces those
+entries in the client's own config with a single gateway entry, and registers the gateway with the
+console.
+
+It writes nothing without `--apply`. What it prints first is the part worth reading:
+
+- **how every tool would be classified**, and from what — a policy rule, an MCP annotation, or the
+  shape of its name
+- **which tools would be refused**, because nothing could classify them and `on_unclassified` is
+  `deny`. A `policy.yaml` stub is generated for each, so classifying one is uncommenting four lines
+- **which would wait for a human**, under the default `approve-writes` posture
+- **which descriptions carry injected instructions**, and what was done about them
+- **which tools the gateway will not pass on at all**, because their names cannot be read or cannot
+  be told apart from another tool's. These never reach the agent, and they are absent from the tool
+  list the gateway serves, so they are reported separately rather than quietly going missing
+- **which servers were not adopted**, each with the reason and the remedy. An SSE server has no
+  upstream transport here; an HTTP server on loopback is refused by the egress guard unless
+  `--allow-local-http` relaxes it, which it then says it has done
+
+Secrets stay where they already were. An `env` block on an adopted server moves onto the gateway's
+own client entry, and the upstream names the variable in `pass_env` — so `gateway.yaml` holds no
+credential and is safe to commit, and a value the client was expanding goes on being expanded by the
+client. `--copy-env` writes literal values into `gateway.yaml` instead, which is needed only when two
+servers want the same variable name with different values.
+
+Adoption is reversible and re-runnable: `--revert` restores the original entries exactly, refusing
+rather than clobbering a name something else has taken since, and a second `--apply` merges only the
+servers that appeared in the meantime.
+
 ## Seeing all of it at once
 
 ```bash

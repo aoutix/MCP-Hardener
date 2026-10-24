@@ -42,6 +42,13 @@ export interface GatewayTool {
   readonly hidden: boolean;
 }
 
+/** A tool this gateway would not register, and why. */
+export interface WithheldTool {
+  readonly localName: string;
+  readonly upstream: string;
+  readonly reason: string;
+}
+
 export interface GatewayOptions {
   readonly config: GatewayConfig;
   readonly policy: Policy;
@@ -121,6 +128,7 @@ export class Gateway {
   private readonly session = randomUUID();
   private readonly connections: UpstreamConnection[] = [];
   private readonly tools = new Map<string, GatewayTool>();
+  private readonly withheldTools: WithheldTool[] = [];
   private tenantValue: string | undefined;
   /** Shared by every per-session `Server` this gateway mints. */
   private readonly instructions: string;
@@ -242,6 +250,13 @@ export class Gateway {
    * this gateway would not pass on.
    */
   private refuseName(localName: string, upstream: string, why: string): void {
+    /*
+     * Kept in memory as well as audited, because `adopt` has to be able to
+     * report it. A tool that vanishes between the upstream's own list and this
+     * gateway's, with the explanation only in a log file nobody has opened
+     * yet, reads as the gateway having silently broken the server.
+     */
+    this.withheldTools.push({ localName, upstream, reason: why });
     this.audit.append({
       tool: localName,
       decision: "deny",
@@ -728,6 +743,17 @@ export class Gateway {
   /** What the gateway decided about each upstream tool, for `hmcp-gateway tools`. */
   inventory(): readonly GatewayTool[] {
     return [...this.tools.values()];
+  }
+
+  /**
+   * Tools an upstream advertised that this gateway would not register.
+   *
+   * Empty until `connectUpstreams()` has run. These are absent from
+   * `inventory()` by design -- they were never registered -- so anything
+   * reporting on a tool surface has to ask for them separately.
+   */
+  withheld(): readonly WithheldTool[] {
+    return [...this.withheldTools];
   }
 
   /** Scans every upstream's advertised surface, without connecting as a server. */
