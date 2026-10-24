@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A fork's PR gets no secrets and no write access; nothing here needs either.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The floor the packages declare, and current. The gateway spawns child
+        # processes and opens sockets, so a Node difference is the kind of thing
+        # that shows up in the tests rather than at the type level.
+        node: ["22.5.0", "22.x", "24.x"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Pack every publishable package
+        # `files: ["dist"]` plus a dist/ that a clean build can empty makes
+        # publishing an empty package a real possibility. Packing in CI means a
+        # tarball missing its entry point fails here rather than on npm.
+        run: |
+          set -euo pipefail
+          for pkg in core scanner gateway cli web; do
+            npm pack --dry-run -w "./packages/$pkg" --json > "/tmp/$pkg.json"
+          done
+          node --input-type=module -e '
+            import { readFileSync } from "node:fs";
+            const required = {
+              gateway: "dist/cli.js",
+              cli: "dist/cli.js",
+              web: "dist/cli.js",
+              core: "dist/index.js",
+              scanner: "dist/index.js"
+            };
+            let failed = false;
+            for (const [pkg, entry] of Object.entries(required)) {
+              const files = JSON.parse(readFileSync(`/tmp/${pkg}.json`, "utf8"))[0].files.map((f) => f.path);
+              if (!files.includes(entry)) {
+                console.error(`${pkg}: tarball is missing ${entry}`);
+                failed = true;
+              }
+            }
+            process.exit(failed ? 1 : 0);
+          '

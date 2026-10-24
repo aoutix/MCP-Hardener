@@ -1,0 +1,63 @@
+name: Release
+
+# Tag-gated, because publishing a security gateway by hand from a laptop is the
+# wrong default: what reaches npm should be what CI built from a commit anyone
+# can go and read.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Pack and verify without publishing"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  # For npm trusted publishing, which signs the provenance attestation.
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: npm
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          registry-url: https://registry.npmjs.org
+          cache: npm
+
+      - run: npm ci
+      - run: npm run build
+      - run: npm run typecheck
+      - run: npm test
+
+      - name: Check the tag matches the version being published
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          version="$(node -p "require('./packages/gateway/package.json').version")"
+          if [ "$tag" != "$version" ]; then
+            echo "tag $GITHUB_REF_NAME does not match gateway version $version" >&2
+            exit 1
+          fi
+
+      - name: Publish in dependency order
+        # Internal deps are pinned to exact versions, so an out-of-order publish
+        # fails rather than resolving against something stale. The order is the
+        # dependency graph: core has no internal deps, web has all of them.
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          DRY: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && '--dry-run' || '' }}
+        run: |
+          set -euo pipefail
+          for pkg in core scanner gateway cli web; do
+            echo "::group::publish $pkg"
+            npm publish -w "./packages/$pkg" --provenance --access public $DRY
+            echo "::endgroup::"
+          done
