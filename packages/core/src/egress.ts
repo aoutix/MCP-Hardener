@@ -1,5 +1,5 @@
 import { lookup as dnsLookup } from "node:dns";
-import { Agent, request as undiciRequest } from "undici";
+import { Agent, fetch, request as undiciRequest, type RequestInit as UndiciRequestInit } from "undici";
 import { classifyAddress, isIpLiteral } from "./ip.js";
 import type { EgressConfig } from "./policy.js";
 
@@ -251,13 +251,13 @@ export class EgressGuard {
       const response = await fetch(target, {
         method,
         ...(init.headers ? { headers: init.headers } : {}),
-        ...(init.body !== undefined && init.body !== null ? { body: init.body as RequestInit["body"] } : {}),
+        ...(init.body !== undefined && init.body !== null ? { body: init.body as UndiciRequestInit["body"] } : {}),
         ...(init.signal ? { signal: init.signal } : {}),
         // Never followed by the implementation: a redirect is a request to a
         // URL the allowlist has not seen, so it comes back here to be checked.
         redirect: "manual",
         dispatcher
-      } as RequestInit);
+      } as UndiciRequestInit);
 
       const isRedirect = response.status >= 300 && response.status < 400 && response.status !== 304;
       if (!isRedirect) return this.capped(response);
